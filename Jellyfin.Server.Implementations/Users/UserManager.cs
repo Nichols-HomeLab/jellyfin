@@ -96,6 +96,12 @@ namespace Jellyfin.Server.Implementations.Users
         public event EventHandler<GenericEventArgs<User>>? OnUserUpdated;
 
         /// <inheritdoc/>
+        public IEnumerable<User> Users => GetUsers();
+
+        /// <inheritdoc/>
+        public IEnumerable<Guid> UsersIds => GetUsersIds();
+
+        /// <inheritdoc/>
         public IEnumerable<User> GetUsers()
         {
             using var dbContext = _dbProvider.CreateDbContext();
@@ -209,6 +215,13 @@ namespace Jellyfin.Server.Implementations.Users
             var eventArgs = new UserUpdatedEventArgs(user);
             await _eventManager.PublishAsync(eventArgs).ConfigureAwait(false);
             OnUserUpdated?.Invoke(this, eventArgs);
+        }
+
+        /// <inheritdoc/>
+        public Task RenameUser(User user, string newName)
+        {
+            ArgumentNullException.ThrowIfNull(user);
+            return RenameUser(user.Id, user.Username, newName);
         }
 
         /// <inheritdoc/>
@@ -380,6 +393,13 @@ namespace Jellyfin.Server.Implementations.Users
         }
 
         /// <inheritdoc/>
+        public Task ResetPassword(User user)
+        {
+            ArgumentNullException.ThrowIfNull(user);
+            return ResetPassword(user.Id);
+        }
+
+        /// <inheritdoc/>
         public async Task ChangePassword(Guid userId, string newPassword)
         {
             User dbUser = null!;
@@ -405,6 +425,13 @@ namespace Jellyfin.Server.Implementations.Users
             }
 
             await _eventManager.PublishAsync(new UserPasswordChangedEventArgs(dbUser)).ConfigureAwait(false);
+        }
+
+        /// <inheritdoc/>
+        public Task ChangePassword(User user, string newPassword)
+        {
+            ArgumentNullException.ThrowIfNull(user);
+            return ChangePassword(user.Id, newPassword);
         }
 
         /// <inheritdoc/>
