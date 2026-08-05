@@ -1,4 +1,7 @@
 .git
+**/.git
+**/bin
+**/obj
 .dockerignore
 Dockerfile
 Dockerfile.arm
@@ -9,3 +12,4 @@ deployment/*/dist
 deployment/*/pkg-dist
 deployment/collect-dist/
 ci/
+plugins/Jellyfin.Pgsql/jellyfin

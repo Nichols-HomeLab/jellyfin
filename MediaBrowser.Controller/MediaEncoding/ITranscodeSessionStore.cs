@@ -11,13 +11,18 @@ namespace MediaBrowser.Controller.MediaEncoding;
 public interface ITranscodeSessionStore
 {
     /// <summary>
+    /// Gets a value indicating whether durable HA coordination is enabled.
+    /// </summary>
+    bool IsEnabled => false;
+
+    /// <summary>
     /// Attempts to retrieve a transcoding session by its play session identifier.
     /// </summary>
     /// <param name="playSessionId">The play session identifier.</param>
     /// <param name="cancellationToken">A cancellation token.</param>
     /// <returns>
-    /// The <see cref="TranscodeSession"/> if it exists and its lease has not expired;
-    /// otherwise <c>null</c>.
+    /// The <see cref="TranscodeSession"/> if its recovery record still exists,
+    /// including records with expired leases; otherwise <c>null</c>.
     /// </returns>
     Task<TranscodeSession?> TryGetAsync(string playSessionId, CancellationToken cancellationToken = default);
 
@@ -37,6 +42,15 @@ public interface ITranscodeSessionStore
     Task<bool> TryTakeoverAsync(string playSessionId, string claimingPod, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Atomically creates a session only when no recovery record exists.
+    /// </summary>
+    /// <param name="session">The initial durable session record.</param>
+    /// <param name="cancellationToken">A cancellation token.</param>
+    /// <returns><c>true</c> when the record was created; otherwise <c>false</c>.</returns>
+    Task<bool> TryCreateAsync(TranscodeSession session, CancellationToken cancellationToken = default)
+        => Task.FromResult(false);
+
+    /// <summary>
     /// Persists a new or updated transcoding session.
     /// </summary>
     /// <param name="session">The session to store.</param>
@@ -54,12 +68,54 @@ public interface ITranscodeSessionStore
     Task RenewLeaseAsync(string playSessionId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Renews a session only when <paramref name="ownerPod"/> still owns it.
+    /// </summary>
+    /// <param name="playSessionId">The play session identifier.</param>
+    /// <param name="ownerPod">The expected current owner.</param>
+    /// <param name="cancellationToken">A cancellation token.</param>
+    /// <returns><c>true</c> when the owner still held a live lease and it was renewed.</returns>
+    Task<bool> RenewLeaseAsync(string playSessionId, string ownerPod, CancellationToken cancellationToken = default)
+        => Task.FromResult(false);
+
+    /// <summary>
     /// Removes a transcoding session from the store.
     /// </summary>
     /// <param name="playSessionId">The play session identifier.</param>
     /// <param name="cancellationToken">A cancellation token.</param>
     /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     Task DeleteAsync(string playSessionId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Deletes a session only when <paramref name="ownerPod"/> still owns it.
+    /// </summary>
+    /// <param name="playSessionId">The play session identifier.</param>
+    /// <param name="ownerPod">The expected current owner.</param>
+    /// <param name="cancellationToken">A cancellation token.</param>
+    /// <returns><c>true</c> when the owned record was deleted.</returns>
+    Task<bool> DeleteAsync(string playSessionId, string ownerPod, CancellationToken cancellationToken = default)
+        => Task.FromResult(false);
+
+    /// <summary>
+    /// Atomically advances the durable stream checkpoint when the caller owns
+    /// the lease. Progress never moves backwards.
+    /// </summary>
+    /// <param name="playSessionId">The play session identifier.</param>
+    /// <param name="ownerPod">The expected current owner.</param>
+    /// <param name="manifestPath">The shared HLS manifest path.</param>
+    /// <param name="segmentPathPrefix">The shared HLS segment path prefix.</param>
+    /// <param name="completedSegmentIndex">The last completely served segment index.</param>
+    /// <param name="durablePlaybackOffset">The corresponding playback offset in ticks.</param>
+    /// <param name="cancellationToken">A cancellation token.</param>
+    /// <returns><c>true</c> when the checkpoint was updated by the current owner.</returns>
+    Task<bool> UpdateProgressAsync(
+        string playSessionId,
+        string ownerPod,
+        string manifestPath,
+        string segmentPathPrefix,
+        int completedSegmentIndex,
+        long durablePlaybackOffset,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(false);
 
     /// <summary>
     /// Returns all currently active transcoding sessions from the store.

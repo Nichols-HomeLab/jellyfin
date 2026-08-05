@@ -1,5 +1,10 @@
 # jellyfin-ha
 
+This fork's production image combines the Redis-backed HA server with the
+optimized `Jellyfin.Pgsql` provider. See
+[README.HA-POSTGRESQL.md](README.HA-POSTGRESQL.md) for the supported image and
+runtime configuration.
+
 **A fork of [Jellyfin](https://github.com/jellyfin/jellyfin) adding high-availability transcoding support for multi-pod Kubernetes deployments.**
 
 [![License: GPL v2](https://img.shields.io/badge/License-GPL_v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)

@@ -16,4 +16,11 @@ public sealed class TranscodeStoreOptions
     /// Gets or sets the duration in seconds for which a transcoding session lease is valid.
     /// </summary>
     public int LeaseDurationSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Gets or sets how long an expired session remains available for recovery.
+    /// This must be longer than <see cref="LeaseDurationSeconds"/> so another
+    /// instance can inspect and atomically claim the durable checkpoint.
+    /// </summary>
+    public int RecoveryRetentionSeconds { get; set; } = 300;
 }

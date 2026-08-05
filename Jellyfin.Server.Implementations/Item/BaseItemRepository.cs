@@ -33,6 +33,7 @@ using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.LiveTv;
 using MediaBrowser.Model.Querying;
 using Microsoft.EntityFrameworkCore;
@@ -69,6 +70,7 @@ public sealed class BaseItemRepository
     private readonly IItemTypeLookup _itemTypeLookup;
     private readonly IServerConfigurationManager _serverConfigurationManager;
     private readonly ILogger<BaseItemRepository> _logger;
+    private readonly ILocalizationManager _localizationManager;
 
     private static readonly IReadOnlyList<ItemValueType> _getAllArtistsValueTypes = [ItemValueType.Artist, ItemValueType.AlbumArtist];
     private static readonly IReadOnlyList<ItemValueType> _getArtistValueTypes = [ItemValueType.Artist];
@@ -85,18 +87,21 @@ public sealed class BaseItemRepository
     /// <param name="itemTypeLookup">The static type lookup.</param>
     /// <param name="serverConfigurationManager">The server Configuration manager.</param>
     /// <param name="logger">System logger.</param>
+    /// <param name="localizationManager">Localization manager.</param>
     public BaseItemRepository(
         IDbContextFactory<JellyfinDbContext> dbProvider,
         IServerApplicationHost appHost,
         IItemTypeLookup itemTypeLookup,
         IServerConfigurationManager serverConfigurationManager,
-        ILogger<BaseItemRepository> logger)
+        ILogger<BaseItemRepository> logger,
+        ILocalizationManager localizationManager)
     {
         _dbProvider = dbProvider;
         _appHost = appHost;
         _itemTypeLookup = itemTypeLookup;
         _serverConfigurationManager = serverConfigurationManager;
         _logger = logger;
+        _localizationManager = localizationManager;
     }
 
     /// <inheritdoc />
@@ -275,7 +280,7 @@ public sealed class BaseItemRepository
         }
 
         dbQuery = ApplyQueryPaging(dbQuery, filter);
-        dbQuery = ApplyNavigations(dbQuery, filter);
+        dbQuery = ApplyNavigations(context, dbQuery, filter);
 
         result.Items = dbQuery.AsEnumerable().Where(e => e is not null).Select(w => DeserializeBaseItem(w, filter.SkipDeserialization)).ToArray();
         result.StartIndex = filter.StartIndex ?? 0;
@@ -305,7 +310,7 @@ public sealed class BaseItemRepository
                 return Array.Empty<BaseItemDto>();
             }
 
-            var itemsById = ApplyNavigations(context.BaseItems.Where(e => orderedIds.Contains(e.Id)), filter)
+            var itemsById = ApplyNavigations(context, context.BaseItems.Where(e => orderedIds.Contains(e.Id)), filter)
                 .AsEnumerable()
                 .Select(w => DeserializeBaseItem(w, filter.SkipDeserialization))
                 .Where(dto => dto is not null)
@@ -314,7 +319,7 @@ public sealed class BaseItemRepository
             return orderedIds.Where(itemsById.ContainsKey).Select(id => itemsById[id]).ToArray()!;
         }
 
-        dbQuery = ApplyNavigations(dbQuery, filter);
+        dbQuery = ApplyNavigations(context, dbQuery, filter);
 
         return dbQuery.AsEnumerable().Where(e => e is not null).Select(w => DeserializeBaseItem(w, filter.SkipDeserialization)).ToArray();
     }
@@ -333,32 +338,43 @@ public sealed class BaseItemRepository
 
         using var context = _dbProvider.CreateDbContext();
 
-        // Subquery to group by SeriesNames/Album and get the max Date Created for each group.
+        // Select only the newest group keys. The previous cutoff-based query
+        // re-read every group newer than the oldest selected date, which could
+        // expand a small Latest request into a large intermediate result.
         var subquery = PrepareItemQuery(context, filter);
         subquery = TranslateQuery(subquery, context, filter);
-        var subqueryGrouped = subquery.GroupBy(g => collectionType == CollectionType.tvshows ? g.SeriesName : g.Album)
-            .Select(g => new
-            {
-                Key = g.Key,
-                MaxDateCreated = g.Max(a => a.DateCreated)
-            })
-            .OrderByDescending(g => g.MaxDateCreated)
-            .Select(g => g);
+        var latestGroupKeys = collectionType == CollectionType.tvshows
+            ? subquery
+                .Where(item => item.SeriesName != null)
+                .GroupBy(item => item.SeriesName)
+                .Select(group => new { Key = group.Key!, MaxDateCreated = group.Max(item => item.DateCreated) })
+                .OrderByDescending(group => group.MaxDateCreated)
+                .ThenBy(group => group.Key)
+                .Select(group => group.Key)
+            : subquery
+                .Where(item => item.Album != null)
+                .GroupBy(item => item.Album)
+                .Select(group => new { Key = group.Key!, MaxDateCreated = group.Max(item => item.DateCreated) })
+                .OrderByDescending(group => group.MaxDateCreated)
+                .ThenBy(group => group.Key)
+                .Select(group => group.Key);
 
-        if (filter.Limit.HasValue)
+        if (filter.Limit is { } limit)
         {
-            subqueryGrouped = subqueryGrouped.Take(filter.Limit.Value);
+            latestGroupKeys = latestGroupKeys.Take(limit);
         }
 
         filter.Limit = null;
 
         var mainquery = PrepareItemQuery(context, filter);
         mainquery = TranslateQuery(mainquery, context, filter);
-        mainquery = mainquery.Where(g => g.DateCreated >= subqueryGrouped.Min(s => s.MaxDateCreated));
+        mainquery = collectionType == CollectionType.tvshows
+            ? mainquery.Where(item => latestGroupKeys.Contains(item.SeriesName!))
+            : mainquery.Where(item => latestGroupKeys.Contains(item.Album!));
         mainquery = ApplyGroupingFilter(context, mainquery, filter);
         mainquery = ApplyQueryPaging(mainquery, filter);
 
-        mainquery = ApplyNavigations(mainquery, filter);
+        mainquery = ApplyNavigations(context, mainquery, filter);
 
         return mainquery.AsEnumerable().Where(e => e is not null).Select(w => DeserializeBaseItem(w, filter.SkipDeserialization)).ToArray();
     }
@@ -376,13 +392,17 @@ public sealed class BaseItemRepository
             .Where(i => filter.TopParentIds.Contains(i.TopParentId!.Value))
             .Where(i => i.Type == _itemTypeLookup.BaseItemKindNames[BaseItemKind.Episode])
             .Join(
-                context.UserData.AsNoTracking().Where(e => e.ItemId != EF.Constant(PlaceholderId)),
-                i => new { UserId = filter.User.Id, ItemId = i.Id },
-                u => new { UserId = u.UserId, ItemId = u.ItemId },
+                context.UserData
+                    .AsNoTracking()
+                    .Where(userData => userData.ItemId != EF.Constant(PlaceholderId))
+                    .Where(userData => userData.UserId == filter.User.Id)
+                    .Where(userData => userData.LastPlayedDate != null && userData.LastPlayedDate >= dateCutoff),
+                item => item.Id,
+                userData => userData.ItemId,
                 (entity, data) => new { Item = entity, UserData = data })
             .GroupBy(g => g.Item.SeriesPresentationUniqueKey)
             .Select(g => new { g.Key, LastPlayedDate = g.Max(u => u.UserData.LastPlayedDate) })
-            .Where(g => g.Key != null && g.LastPlayedDate != null && g.LastPlayedDate >= dateCutoff)
+            .Where(g => g.Key != null)
             .OrderByDescending(g => g.LastPlayedDate)
             .Select(g => g.Key!);
 
@@ -392,6 +412,29 @@ public sealed class BaseItemRepository
         }
 
         return query.ToArray();
+    }
+
+    /// <summary>
+    /// Builds the PostgreSQL representative-row subquery with an aggregate
+    /// instead of GroupBy/FirstOrDefault's window-function translation.
+    /// </summary>
+    /// <typeparam name="TKey">The grouping-key type.</typeparam>
+    /// <param name="query">The filtered BaseItems query.</param>
+    /// <param name="keySelector">The grouping key.</param>
+    /// <returns>The stable lowest item identifier for every group.</returns>
+    internal static IQueryable<Guid> SelectRepresentativeIds<TKey>(
+        IQueryable<BaseItemEntity> query,
+        Expression<Func<BaseItemEntity, TKey>> keySelector)
+    {
+        return query.GroupBy(keySelector).Select(group => group.Min(item => item.Id));
+    }
+
+    private static bool UsePostgreSqlQueryOptimizations(JellyfinDbContext context)
+    {
+        return string.Equals(
+            context.Database.ProviderName,
+            "Npgsql.EntityFrameworkCore.PostgreSQL",
+            StringComparison.Ordinal);
     }
 
     private IQueryable<BaseItemEntity> ApplyGroupingFilter(JellyfinDbContext context, IQueryable<BaseItemEntity> dbQuery, InternalItemsQuery filter)
@@ -404,17 +447,23 @@ public sealed class BaseItemRepository
         var enableGroupByPresentationUniqueKey = EnableGroupByPresentationUniqueKey(filter);
         if (enableGroupByPresentationUniqueKey && filter.GroupBySeriesPresentationUniqueKey)
         {
-            var tempQuery = dbQuery.GroupBy(e => new { e.PresentationUniqueKey, e.SeriesPresentationUniqueKey }).Select(e => e.FirstOrDefault()).Select(e => e!.Id);
+            var tempQuery = UsePostgreSqlQueryOptimizations(context)
+                ? SelectRepresentativeIds(dbQuery, e => new { e.PresentationUniqueKey, e.SeriesPresentationUniqueKey })
+                : dbQuery.GroupBy(e => new { e.PresentationUniqueKey, e.SeriesPresentationUniqueKey }).Select(e => e.FirstOrDefault()).Select(e => e!.Id);
             dbQuery = context.BaseItems.Where(e => tempQuery.Contains(e.Id));
         }
         else if (enableGroupByPresentationUniqueKey)
         {
-            var tempQuery = dbQuery.GroupBy(e => e.PresentationUniqueKey).Select(e => e.FirstOrDefault()).Select(e => e!.Id);
+            var tempQuery = UsePostgreSqlQueryOptimizations(context)
+                ? SelectRepresentativeIds(dbQuery, e => e.PresentationUniqueKey)
+                : dbQuery.GroupBy(e => e.PresentationUniqueKey).Select(e => e.FirstOrDefault()).Select(e => e!.Id);
             dbQuery = context.BaseItems.Where(e => tempQuery.Contains(e.Id));
         }
         else if (filter.GroupBySeriesPresentationUniqueKey)
         {
-            var tempQuery = dbQuery.GroupBy(e => e.SeriesPresentationUniqueKey).Select(e => e.FirstOrDefault()).Select(e => e!.Id);
+            var tempQuery = UsePostgreSqlQueryOptimizations(context)
+                ? SelectRepresentativeIds(dbQuery, e => e.SeriesPresentationUniqueKey)
+                : dbQuery.GroupBy(e => e.SeriesPresentationUniqueKey).Select(e => e.FirstOrDefault()).Select(e => e!.Id);
             dbQuery = context.BaseItems.Where(e => tempQuery.Contains(e.Id));
         }
         else
@@ -427,7 +476,7 @@ public sealed class BaseItemRepository
         return dbQuery;
     }
 
-    private static IQueryable<BaseItemEntity> ApplyNavigations(IQueryable<BaseItemEntity> dbQuery, InternalItemsQuery filter)
+    private static IQueryable<BaseItemEntity> ApplyNavigations(JellyfinDbContext context, IQueryable<BaseItemEntity> dbQuery, InternalItemsQuery filter)
     {
         if (filter.TrailerTypes.Length > 0 || filter.IncludeItemTypes.Contains(BaseItemKind.Trailer))
         {
@@ -454,7 +503,11 @@ public sealed class BaseItemRepository
             dbQuery = dbQuery.Include(e => e.Images);
         }
 
-        return dbQuery;
+        // PostgreSQL pays a steep price for one query containing multiple
+        // collection navigations: the joined rows multiply and spill to temp
+        // files. Split queries keep the already-paged BaseItems query small and
+        // load each requested collection with a separate indexed query.
+        return UsePostgreSqlQueryOptimizations(context) ? dbQuery.AsSplitQuery() : dbQuery;
     }
 
     private IQueryable<BaseItemEntity> ApplyQueryPaging(IQueryable<BaseItemEntity> dbQuery, InternalItemsQuery filter)
@@ -482,14 +535,14 @@ public sealed class BaseItemRepository
         dbQuery = TranslateQuery(dbQuery, context, filter);
         dbQuery = ApplyGroupingFilter(context, dbQuery, filter);
         dbQuery = ApplyQueryPaging(dbQuery, filter);
-        dbQuery = ApplyNavigations(dbQuery, filter);
+        dbQuery = ApplyNavigations(context, dbQuery, filter);
         return dbQuery;
     }
 
     private IQueryable<BaseItemEntity> PrepareItemQuery(JellyfinDbContext context, InternalItemsQuery filter)
     {
         IQueryable<BaseItemEntity> dbQuery = context.BaseItems.AsNoTracking();
-        dbQuery = dbQuery.AsSingleQuery();
+        dbQuery = UsePostgreSqlQueryOptimizations(context) ? dbQuery.AsSplitQuery() : dbQuery.AsSingleQuery();
 
         return dbQuery;
     }
@@ -1305,18 +1358,22 @@ public sealed class BaseItemRepository
             ExcludeItemIds = filter.ExcludeItemIds
         };
 
-        var masterQuery = TranslateQuery(innerQuery, context, outerQueryFilter)
-            .GroupBy(e => e.PresentationUniqueKey)
-            .Select(e => e.FirstOrDefault())
-            .Select(e => e!.Id);
+        var filteredMasterQuery = TranslateQuery(innerQuery, context, outerQueryFilter);
+        var masterQuery = UsePostgreSqlQueryOptimizations(context)
+            ? SelectRepresentativeIds(filteredMasterQuery, e => e.PresentationUniqueKey)
+            : filteredMasterQuery
+                .GroupBy(e => e.PresentationUniqueKey)
+                .Select(e => e.FirstOrDefault())
+                .Select(e => e!.Id);
 
-        var query = context.BaseItems
+        IQueryable<BaseItemEntity> query = context.BaseItems
             .Include(e => e.TrailerTypes)
             .Include(e => e.Provider)
             .Include(e => e.LockedFields)
             .Include(e => e.Images)
-            .AsSingleQuery()
             .Where(e => masterQuery.Contains(e.Id));
+
+        query = UsePostgreSqlQueryOptimizations(context) ? query.AsSplitQuery() : query.AsSingleQuery();
 
         query = ApplyOrder(query, filter, context);
 
@@ -1595,7 +1652,7 @@ public sealed class BaseItemRepository
         }
         else if (orderBy.Length == 0)
         {
-            return query.OrderBy(e => e.SortName);
+            return query.OrderBy(e => e.SortName).ThenBy(e => e.Id);
         }
 
         IOrderedQueryable<BaseItemEntity>? orderedQuery = null;
@@ -1646,7 +1703,7 @@ public sealed class BaseItemRepository
             }
         }
 
-        return orderedQuery ?? query;
+        return orderedQuery is null ? query : orderedQuery.ThenBy(e => e.Id);
     }
 
     private IQueryable<BaseItemEntity> TranslateQuery(
@@ -2297,26 +2354,42 @@ public sealed class BaseItemRepository
 
         if (!string.IsNullOrWhiteSpace(filter.HasNoAudioTrackWithLanguage))
         {
-            baseQuery = baseQuery
-                .Where(e => !e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Audio && f.Language == filter.HasNoAudioTrackWithLanguage));
+            var lang = _localizationManager.FindLanguageInfo(filter.HasNoAudioTrackWithLanguage);
+            if (lang is not null)
+            {
+                baseQuery = baseQuery
+                    .Where(e => !e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Audio && lang.ThreeLetterISOLanguageNames.Contains(f.Language)));
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(filter.HasNoInternalSubtitleTrackWithLanguage))
         {
-            baseQuery = baseQuery
-                .Where(e => !e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle && !f.IsExternal && f.Language == filter.HasNoInternalSubtitleTrackWithLanguage));
+            var lang = _localizationManager.FindLanguageInfo(filter.HasNoInternalSubtitleTrackWithLanguage);
+            if (lang is not null)
+            {
+                baseQuery = baseQuery
+                    .Where(e => !e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle && !f.IsExternal && lang.ThreeLetterISOLanguageNames.Contains(f.Language)));
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(filter.HasNoExternalSubtitleTrackWithLanguage))
         {
-            baseQuery = baseQuery
-                .Where(e => !e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle && f.IsExternal && f.Language == filter.HasNoExternalSubtitleTrackWithLanguage));
+            var lang = _localizationManager.FindLanguageInfo(filter.HasNoExternalSubtitleTrackWithLanguage);
+            if (lang is not null)
+            {
+                baseQuery = baseQuery
+                    .Where(e => !e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle && f.IsExternal && lang.ThreeLetterISOLanguageNames.Contains(f.Language)));
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(filter.HasNoSubtitleTrackWithLanguage))
         {
-            baseQuery = baseQuery
-                .Where(e => !e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle && f.Language == filter.HasNoSubtitleTrackWithLanguage));
+            var lang = _localizationManager.FindLanguageInfo(filter.HasNoSubtitleTrackWithLanguage);
+            if (lang is not null)
+            {
+                baseQuery = baseQuery
+                    .Where(e => !e.MediaStreams!.Any(f => f.StreamType == MediaStreamTypeEntity.Subtitle && lang.ThreeLetterISOLanguageNames.Contains(f.Language)));
+            }
         }
 
         if (filter.HasSubtitles.HasValue)

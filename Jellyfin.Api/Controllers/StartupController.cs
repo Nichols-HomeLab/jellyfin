@@ -1,5 +1,5 @@
+using System;
 using System.ComponentModel.DataAnnotations;
-using System.Linq;
 using System.Threading.Tasks;
 using Jellyfin.Api.Constants;
 using Jellyfin.Api.Models.StartupDtos;
@@ -111,7 +111,7 @@ public class StartupController : BaseJellyfinApiController
     {
         // TODO: Remove this method when startup wizard no longer requires an existing user.
         await _userManager.InitializeAsync().ConfigureAwait(false);
-        var user = _userManager.Users.First();
+        var user = _userManager.GetFirstUser() ?? throw new InvalidOperationException("No user exists after initialization.");
         return new StartupUserDto
         {
             Name = user.Username
@@ -131,22 +131,29 @@ public class StartupController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<ActionResult> UpdateStartupUser([FromBody] StartupUserDto startupUserDto)
     {
-        var user = _userManager.Users.First();
+        var user = _userManager.GetFirstUser();
+        if (user is null)
+        {
+            return NotFound();
+        }
+
         if (string.IsNullOrWhiteSpace(startupUserDto.Password))
         {
             return BadRequest("Password must not be empty");
         }
 
-        if (startupUserDto.Name is not null)
-        {
-            user.Username = startupUserDto.Name;
-        }
-
         await _userManager.UpdateUserAsync(user).ConfigureAwait(false);
+
+#pragma warning disable CA1309 // Use ordinal string comparison
+        if (startupUserDto.Name is not null && !startupUserDto.Name.Equals(user.Username, StringComparison.InvariantCultureIgnoreCase))
+        {
+            await _userManager.RenameUser(user.Id, user.Username, startupUserDto.Name).ConfigureAwait(false);
+        }
+#pragma warning restore CA1309 // Use ordinal string comparison
 
         if (!string.IsNullOrEmpty(startupUserDto.Password))
         {
-            await _userManager.ChangePassword(user, startupUserDto.Password).ConfigureAwait(false);
+            await _userManager.ChangePassword(user.Id, startupUserDto.Password).ConfigureAwait(false);
         }
 
         return NoContent();

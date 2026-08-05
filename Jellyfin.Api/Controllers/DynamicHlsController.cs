@@ -313,39 +313,35 @@ public class DynamicHlsController : BaseJellyfinApiController
                     // If the playlist doesn't already exist, startup ffmpeg
                     try
                     {
-                        // Check whether this session is already registered in the HA store (takeover scenario).
-                        var isHaMode = false;
-                        if (!string.IsNullOrEmpty(playSessionId))
+                        var ownership = await TryAcquireTranscodeSessionAsync(
+                                playSessionId ?? string.Empty,
+                                mediaSourceId ?? string.Empty,
+                                playlistPath,
+                                GetSegmentPathPrefix(playlistPath),
+                                0,
+                                0,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        if (!ownership.Acquired)
                         {
-                            try
-                            {
-                                var existingSession = await _transcodeSessionStore.TryGetAsync(playSessionId, cancellationToken).ConfigureAwait(false);
-                                isHaMode = existingSession is not null;
-                            }
-                            catch (Exception haEx)
-                            {
-                                _logger.LogWarning(haEx, "Failed to check HA mode for live-stream session {PlaySessionId}.", playSessionId);
-                            }
+                            Response.Headers.RetryAfter = "2";
+                            return StatusCode(StatusCodes.Status503ServiceUnavailable);
                         }
 
                         job = await _transcodeManager.StartFfMpeg(
                                 state,
                                 playlistPath,
-                                GetCommandLineArguments(playlistPath, state, true, 0, isHaMode),
+                                GetCommandLineArguments(playlistPath, state, true, 0, _transcodeSessionStore.IsEnabled),
                                 Request.HttpContext.User.GetUserId(),
                                 TranscodingJobType,
                                 cancellationTokenSource)
                             .ConfigureAwait(false);
                         job.IsLiveOutput = true;
-                        await RegisterTranscodeSessionAsync(
-                                playSessionId ?? string.Empty,
-                                mediaSourceId ?? string.Empty,
-                                cancellationToken)
-                            .ConfigureAwait(false);
                         StartLeaseRenewal(playSessionId ?? string.Empty, cancellationToken);
                     }
                     catch
                     {
+                        await DeleteOwnedTranscodeSessionAsync(playSessionId ?? string.Empty).ConfigureAwait(false);
                         state.Dispose();
                         throw;
                     }
@@ -1550,6 +1546,38 @@ public class DynamicHlsController : BaseJellyfinApiController
                 // If the playlist doesn't already exist, startup ffmpeg
                 try
                 {
+                    streamingRequest.StartTimeTicks = streamingRequest.CurrentRuntimeTicks;
+                    var ownership = await TryAcquireTranscodeSessionAsync(
+                            streamingRequest.PlaySessionId ?? string.Empty,
+                            streamingRequest.MediaSourceId ?? string.Empty,
+                            playlistPath,
+                            GetSegmentPathPrefix(playlistPath),
+                            Math.Max(0, segmentId - 1),
+                            streamingRequest.CurrentRuntimeTicks,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (!ownership.Acquired)
+                    {
+                        // A healthy peer still owns the stream. Give its shared
+                        // segment a brief chance to land before asking the client
+                        // to retry; never start a competing ffmpeg process.
+                        for (var retry = 0; retry < 20 && !System.IO.File.Exists(segmentPath); retry++)
+                        {
+                            await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                        }
+
+                        if (System.IO.File.Exists(segmentPath))
+                        {
+                            return await GetSegmentResult(state, playlistPath, segmentPath, segmentExtension, segmentId, null, cancellationToken).ConfigureAwait(false);
+                        }
+
+                        Response.Headers.RetryAfter = "2";
+                        return StatusCode(StatusCodes.Status503ServiceUnavailable);
+                    }
+
+                    // Only the lease owner may stop a transcoder or mutate the shared
+                    // HLS output. A request routed to another replica must not disturb
+                    // the healthy owner's files while it waits for the next segment.
                     await _transcodeManager.KillTranscodingJobs(streamingRequest.DeviceId, streamingRequest.PlaySessionId, p => false)
                         .ConfigureAwait(false);
 
@@ -1558,40 +1586,26 @@ public class DynamicHlsController : BaseJellyfinApiController
                         await DeleteLastFile(playlistPath, segmentExtension, 0).ConfigureAwait(false);
                     }
 
-                    streamingRequest.StartTimeTicks = streamingRequest.CurrentRuntimeTicks;
-
-                    // Check whether this session is already registered in the HA store (takeover scenario).
-                    var isHaMode = false;
-                    if (!string.IsNullOrEmpty(streamingRequest.PlaySessionId))
+                    if (ownership.RecoveredSession is not null)
                     {
-                        try
-                        {
-                            var existingSession = await _transcodeSessionStore.TryGetAsync(streamingRequest.PlaySessionId, cancellationToken).ConfigureAwait(false);
-                            isHaMode = existingSession is not null;
-                        }
-                        catch (Exception haEx)
-                        {
-                            _logger.LogWarning(haEx, "Failed to check HA mode for segment session {PlaySessionId}.", streamingRequest.PlaySessionId);
-                        }
+                        streamingRequest.StartTimeTicks = Math.Max(
+                            streamingRequest.CurrentRuntimeTicks,
+                            ownership.RecoveredSession.LastDurablePlaybackOffset);
                     }
 
                     state.WaitForPath = segmentPath;
                     job = await _transcodeManager.StartFfMpeg(
                         state,
                         playlistPath,
-                        GetCommandLineArguments(playlistPath, state, false, segmentId, isHaMode),
+                        GetCommandLineArguments(playlistPath, state, false, segmentId, _transcodeSessionStore.IsEnabled),
                         Request.HttpContext.User.GetUserId(),
                         TranscodingJobType,
                         cancellationTokenSource).ConfigureAwait(false);
-                    await RegisterTranscodeSessionAsync(
-                            streamingRequest.PlaySessionId ?? string.Empty,
-                            streamingRequest.MediaSourceId ?? string.Empty,
-                            cancellationToken)
-                        .ConfigureAwait(false);
                     StartLeaseRenewal(streamingRequest.PlaySessionId ?? string.Empty, cancellationToken);
                 }
                 catch
                 {
+                    await DeleteOwnedTranscodeSessionAsync(streamingRequest.PlaySessionId ?? string.Empty).ConfigureAwait(false);
                     state.Dispose();
                     throw;
                 }
@@ -1616,32 +1630,130 @@ public class DynamicHlsController : BaseJellyfinApiController
     private static double[] GetSegmentLengths(StreamState state)
         => GetSegmentLengthsInternal(state.RunTimeTicks ?? 0, state.SegmentLength);
 
-    private async Task RegisterTranscodeSessionAsync(string playSessionId, string mediaSourceId, CancellationToken cancellationToken)
+    private async Task<TranscodeOwnership> TryAcquireTranscodeSessionAsync(
+        string playSessionId,
+        string mediaSourceId,
+        string manifestPath,
+        string segmentPathPrefix,
+        int completedSegmentIndex,
+        long durablePlaybackOffset,
+        CancellationToken cancellationToken)
     {
+        if (!_transcodeSessionStore.IsEnabled)
+        {
+            return new TranscodeOwnership(true, null);
+        }
+
+        if (string.IsNullOrEmpty(playSessionId))
+        {
+            _logger.LogWarning("Refusing an HA transcode without a play session id.");
+            return new TranscodeOwnership(false, null);
+        }
+
+        var ownerPod = GetInstanceId();
         try
         {
             var session = new TranscodeSession
             {
                 PlaySessionId = playSessionId,
-                OwnerPod = Environment.GetEnvironmentVariable("JELLYFIN_INSTANCE_ID")
-                           ?? Environment.MachineName,
-                LeaseExpiresUtc = DateTime.UtcNow.AddSeconds(30),
-                ManifestPath = string.Empty,
-                SegmentPathPrefix = string.Empty,
+                OwnerPod = ownerPod,
+                ManifestPath = manifestPath,
+                SegmentPathPrefix = segmentPathPrefix,
                 MediaSourceId = mediaSourceId,
-                LastCompletedSegmentIndex = 0,
-                LastDurablePlaybackOffset = 0L,
+                LastCompletedSegmentIndex = completedSegmentIndex,
+                LastDurablePlaybackOffset = durablePlaybackOffset,
             };
-            await _transcodeSessionStore.SetAsync(session, cancellationToken).ConfigureAwait(false);
+
+            if (await _transcodeSessionStore.TryCreateAsync(session, cancellationToken).ConfigureAwait(false))
+            {
+                _logger.LogInformation(
+                    "Instance {InstanceId} created HA transcode session {PlaySessionId}.",
+                    ownerPod.ReplaceLineEndings(string.Empty),
+                    playSessionId.ReplaceLineEndings(string.Empty));
+                return new TranscodeOwnership(true, null);
+            }
+
+            var existing = await _transcodeSessionStore.TryGetAsync(playSessionId, cancellationToken).ConfigureAwait(false);
+            if (existing is null)
+            {
+                return new TranscodeOwnership(false, null);
+            }
+
+            if (string.Equals(existing.OwnerPod, ownerPod, StringComparison.Ordinal))
+            {
+                var renewed = await _transcodeSessionStore
+                    .RenewLeaseAsync(playSessionId, ownerPod, cancellationToken)
+                    .ConfigureAwait(false);
+                if (renewed)
+                {
+                    return new TranscodeOwnership(true, null);
+                }
+            }
+
+            if (existing.LeaseExpiresUtc <= DateTime.UtcNow &&
+                await _transcodeSessionStore.TryTakeoverAsync(playSessionId, ownerPod, cancellationToken).ConfigureAwait(false))
+            {
+                _logger.LogInformation(
+                    "Instance {InstanceId} recovered HA transcode session {PlaySessionId} from {PreviousOwner} at segment {SegmentIndex}.",
+                    ownerPod.ReplaceLineEndings(string.Empty),
+                    playSessionId.ReplaceLineEndings(string.Empty),
+                    existing.OwnerPod.ReplaceLineEndings(string.Empty),
+                    existing.LastCompletedSegmentIndex);
+                return new TranscodeOwnership(true, existing);
+            }
+
+            return new TranscodeOwnership(false, existing);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to register HLS session {PlaySessionId} in durable store.", playSessionId);
+            _logger.LogError(
+                ex,
+                "Failed to acquire HLS session {PlaySessionId} in durable store.",
+                playSessionId.ReplaceLineEndings(string.Empty));
+            return new TranscodeOwnership(false, null);
         }
+    }
+
+    private async Task DeleteOwnedTranscodeSessionAsync(string playSessionId)
+    {
+        if (!_transcodeSessionStore.IsEnabled || string.IsNullOrEmpty(playSessionId))
+        {
+            return;
+        }
+
+        try
+        {
+            await _transcodeSessionStore
+                .DeleteAsync(playSessionId, GetInstanceId(), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to delete owned HLS session {PlaySessionId}.",
+                playSessionId.ReplaceLineEndings(string.Empty));
+        }
+    }
+
+    private static string GetInstanceId()
+        => Environment.GetEnvironmentVariable("JELLYFIN_INSTANCE_ID") ?? Environment.MachineName;
+
+    private static string GetSegmentPathPrefix(string playlistPath)
+    {
+        var directory = Path.GetDirectoryName(playlistPath)
+            ?? throw new ArgumentException($"Provided path ({playlistPath}) is not valid.", nameof(playlistPath));
+        return Path.Combine(directory, Path.GetFileNameWithoutExtension(playlistPath));
     }
 
     private void StartLeaseRenewal(string playSessionId, CancellationToken cancellationToken)
     {
+        if (!_transcodeSessionStore.IsEnabled || string.IsNullOrEmpty(playSessionId))
+        {
+            return;
+        }
+
+        var ownerPod = GetInstanceId();
         _ = Task.Run(
             async () =>
             {
@@ -1660,29 +1772,38 @@ public class DynamicHlsController : BaseJellyfinApiController
 
                         try
                         {
-                            await _transcodeSessionStore.RenewLeaseAsync(playSessionId, cancellationToken).ConfigureAwait(false);
+                            var renewed = await _transcodeSessionStore
+                                .RenewLeaseAsync(playSessionId, ownerPod, cancellationToken)
+                                .ConfigureAwait(false);
+                            if (!renewed)
+                            {
+                                _logger.LogWarning(
+                                    "Instance {InstanceId} lost ownership of HLS session {PlaySessionId}; stopping lease renewal.",
+                                    ownerPod.ReplaceLineEndings(string.Empty),
+                                    playSessionId.ReplaceLineEndings(string.Empty));
+                                break;
+                            }
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogWarning(ex, "Failed to renew lease for HLS session {PlaySessionId}.", playSessionId);
+                            _logger.LogWarning(
+                                ex,
+                                "Failed to renew lease for HLS session {PlaySessionId}.",
+                                playSessionId.ReplaceLineEndings(string.Empty));
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Lease renewal loop for HLS session {PlaySessionId} encountered an unexpected error.", playSessionId);
+                    _logger.LogWarning(
+                        ex,
+                        "Lease renewal loop for HLS session {PlaySessionId} encountered an unexpected error.",
+                        playSessionId.ReplaceLineEndings(string.Empty));
                 }
-                finally
-                {
-                    try
-                    {
-                        await _transcodeSessionStore.DeleteAsync(playSessionId, CancellationToken.None).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to delete HLS session {PlaySessionId} from durable store.", playSessionId);
-                    }
-                }
+
+                // Do not delete the recovery record when the transcoder or node
+                // disappears. Redis retains it for the configured recovery window,
+                // allowing another replica to claim the expired lease and resume.
             },
             CancellationToken.None);
     }
@@ -1731,12 +1852,9 @@ public class DynamicHlsController : BaseJellyfinApiController
         var outputExtension = EncodingHelper.GetSegmentFileExtension(state.Request.SegmentContainer);
         var outputTsArg = outputPrefix + "%d" + outputExtension;
 
-        // In HA mode, use shorter segments and a bounded rolling buffer for faster failover recovery.
-        // state.SegmentLength is already validated by the streaming pipeline; RecoverySegmentLengthSeconds
-        // comes from EncodingOptions (user-editable config) so it is clamped here.
-        var effectiveSegmentLength = isHaMode
-            ? Math.Clamp(_encodingOptions.RecoverySegmentLengthSeconds, 1, 6)
-            : state.SegmentLength;
+        // The playlist generator, segment URL runtime calculations, and ffmpeg
+        // must use the same duration. HA changes retention, not segment timing.
+        var effectiveSegmentLength = state.SegmentLength;
         var hlsListSize = isHaMode
             ? Math.Clamp(_encodingOptions.RecoverySegmentBufferCount, 2, 10)
             : 0;
@@ -2086,7 +2204,7 @@ public class DynamicHlsController : BaseJellyfinApiController
             {
                 // Transcoding job is over, so assume all existing files are ready
                 _logger.LogDebug("serving up {0} as transcode is over", segmentPath);
-                return GetSegmentResult(state, segmentPath, transcodingJob);
+                return GetSegmentResult(state, playlistPath, segmentPath, segmentIndex, transcodingJob);
             }
 
             var currentTranscodingIndex = GetCurrentTranscodingIndex(playlistPath, segmentExtension);
@@ -2095,7 +2213,7 @@ public class DynamicHlsController : BaseJellyfinApiController
             if (segmentIndex < currentTranscodingIndex)
             {
                 _logger.LogDebug("serving up {0} as transcode index {1} is past requested point {2}", segmentPath, currentTranscodingIndex, segmentIndex);
-                return GetSegmentResult(state, segmentPath, transcodingJob);
+                return GetSegmentResult(state, playlistPath, segmentPath, segmentIndex, transcodingJob);
             }
         }
 
@@ -2111,7 +2229,7 @@ public class DynamicHlsController : BaseJellyfinApiController
                     if (transcodingJob.HasExited || System.IO.File.Exists(nextSegmentPath))
                     {
                         _logger.LogDebug("Serving up {SegmentPath} as it deemed ready", segmentPath);
-                        return GetSegmentResult(state, segmentPath, transcodingJob);
+                        return GetSegmentResult(state, playlistPath, segmentPath, segmentIndex, transcodingJob);
                     }
                 }
                 else
@@ -2142,14 +2260,21 @@ public class DynamicHlsController : BaseJellyfinApiController
             _logger.LogWarning("cannot serve {0} as it doesn't exist and no transcode is running", segmentPath);
         }
 
-        return GetSegmentResult(state, segmentPath, transcodingJob);
+        return GetSegmentResult(state, playlistPath, segmentPath, segmentIndex, transcodingJob);
     }
 
-    private ActionResult GetSegmentResult(StreamState state, string segmentPath, TranscodingJob? transcodingJob)
+    private ActionResult GetSegmentResult(
+        StreamState state,
+        string playlistPath,
+        string segmentPath,
+        int segmentIndex,
+        TranscodingJob? transcodingJob)
     {
         var segmentEndingPositionTicks = state.Request.CurrentRuntimeTicks + state.Request.ActualSegmentLengthTicks;
+        var playSessionId = state.Request.PlaySessionId ?? string.Empty;
+        var ownerPod = GetInstanceId();
 
-        Response.OnCompleted(() =>
+        Response.OnCompleted(async () =>
         {
             _logger.LogDebug("Finished serving {SegmentPath}", segmentPath);
             if (transcodingJob is not null)
@@ -2158,7 +2283,29 @@ public class DynamicHlsController : BaseJellyfinApiController
                 _transcodeManager.OnTranscodeEndRequest(transcodingJob);
             }
 
-            return Task.CompletedTask;
+            if (_transcodeSessionStore.IsEnabled && !string.IsNullOrEmpty(playSessionId))
+            {
+                try
+                {
+                    await _transcodeSessionStore.UpdateProgressAsync(
+                            playSessionId,
+                            ownerPod,
+                            playlistPath,
+                            GetSegmentPathPrefix(playlistPath),
+                            segmentIndex,
+                            segmentEndingPositionTicks,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Failed to checkpoint HLS session {PlaySessionId} at segment {SegmentIndex}.",
+                        playSessionId.ReplaceLineEndings(string.Empty),
+                        segmentIndex);
+                }
+            }
         });
 
         return FileStreamResponseHelpers.GetStaticFileResult(segmentPath, MimeTypes.GetMimeType(segmentPath));
@@ -2242,4 +2389,6 @@ public class DynamicHlsController : BaseJellyfinApiController
             _logger.LogError(ex, "Error deleting partial stream file(s) {Path}", path);
         }
     }
+
+    private readonly record struct TranscodeOwnership(bool Acquired, TranscodeSession? RecoveredSession);
 }

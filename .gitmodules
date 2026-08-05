@@ -1,0 +1,3 @@
+[submodule "plugins/Jellyfin.Pgsql"]
+	path = plugins/Jellyfin.Pgsql
+	url = https://github.com/Nichols-HomeLab/Jellyfin.Pgsql.git
