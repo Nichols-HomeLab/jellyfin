@@ -104,7 +104,7 @@ return 1";
         var key = GetKey(session.PlaySessionId);
         var json = JsonSerializer.Serialize(session);
         await _db.StringSetAsync(key, json, GetRecoveryRetention()).ConfigureAwait(false);
-        _logger.LogDebug("Set transcode session {PlaySessionId} in Redis.", session.PlaySessionId);
+        _logger.LogDebug("Set transcode session {PlaySessionId} in Redis.", session.PlaySessionId.ReplaceLineEndings(string.Empty));
     }
 
     /// <inheritdoc />
@@ -153,7 +153,7 @@ return 1";
         SetLeaseExpiry(session);
         var json = JsonSerializer.Serialize(session);
         await _db.StringSetAsync(key, json, GetRecoveryRetention()).ConfigureAwait(false);
-        _logger.LogDebug("Renewed lease for transcode session {PlaySessionId}.", playSessionId);
+        _logger.LogDebug("Renewed lease for transcode session {PlaySessionId}.", playSessionId.ReplaceLineEndings(string.Empty));
     }
 
     /// <inheritdoc />
@@ -177,7 +177,7 @@ return 1";
     {
         var key = GetKey(playSessionId);
         await _db.KeyDeleteAsync(key).ConfigureAwait(false);
-        _logger.LogDebug("Deleted transcode session {PlaySessionId} from Redis.", playSessionId);
+        _logger.LogDebug("Deleted transcode session {PlaySessionId} from Redis.", playSessionId.ReplaceLineEndings(string.Empty));
     }
 
     /// <inheritdoc />
@@ -236,7 +236,10 @@ return 1";
         var succeeded = result == 1;
         if (succeeded)
         {
-            _logger.LogInformation("Pod {ClaimingPod} successfully took over transcode session {PlaySessionId}.", claimingPod, playSessionId);
+            _logger.LogInformation(
+                "Pod {ClaimingPod} successfully took over transcode session {PlaySessionId}.",
+                claimingPod.ReplaceLineEndings(string.Empty),
+                playSessionId.ReplaceLineEndings(string.Empty));
         }
 
         return succeeded;
@@ -316,8 +319,8 @@ return 1";
 
         _logger.LogDebug(
             "Set live stream session {LiveStreamId}/{SessionId} in Redis.",
-            session.LiveStreamId,
-            session.SessionId);
+            session.LiveStreamId.ReplaceLineEndings(string.Empty),
+            session.SessionId.ReplaceLineEndings(string.Empty));
     }
 
     /// <inheritdoc />
@@ -357,8 +360,8 @@ return 1";
                 await _db.KeyDeleteAsync(keysToDelete.ToArray()).ConfigureAwait(false);
                 _logger.LogDebug(
                     "Deleted live stream session {LiveStreamId}/{SessionId} from Redis.",
-                    liveStreamId,
-                    session.SessionId);
+                    liveStreamId.ReplaceLineEndings(string.Empty),
+                    session.SessionId.ReplaceLineEndings(string.Empty));
                 return;
             }
         }

@@ -503,7 +503,9 @@ namespace Jellyfin.Server.Implementations.Users
         {
             if (string.IsNullOrWhiteSpace(username))
             {
-                _logger.LogInformation("Authentication request without username has been denied (IP: {IP}).", remoteEndPoint);
+                _logger.LogInformation(
+                    "Authentication request without username has been denied (IP: {IP}).",
+                    remoteEndPoint.ReplaceLineEndings(string.Empty));
                 throw new ArgumentNullException(nameof(username));
             }
 
@@ -577,8 +579,8 @@ namespace Jellyfin.Server.Implementations.Users
                 {
                     _logger.LogInformation(
                         "Authentication request for {UserName} has been denied (IP: {IP}).",
-                        username,
-                        remoteEndPoint);
+                        username.ReplaceLineEndings(string.Empty),
+                        remoteEndPoint.ReplaceLineEndings(string.Empty));
                     throw new AuthenticationException("Invalid username or password entered.");
                 }
 
@@ -586,8 +588,8 @@ namespace Jellyfin.Server.Implementations.Users
                 {
                     _logger.LogInformation(
                         "Authentication request for {UserName} has been denied because this account is currently disabled (IP: {IP}).",
-                        username,
-                        remoteEndPoint);
+                        username.ReplaceLineEndings(string.Empty),
+                        remoteEndPoint.ReplaceLineEndings(string.Empty));
                     throw new SecurityException(
                         $"The {user.Username} account is currently disabled. Please consult with your administrator.");
                 }
@@ -597,8 +599,8 @@ namespace Jellyfin.Server.Implementations.Users
                 {
                     _logger.LogInformation(
                         "Authentication request for {UserName} forbidden: remote access disabled and user not in local network (IP: {IP}).",
-                        username,
-                        remoteEndPoint);
+                        username.ReplaceLineEndings(string.Empty),
+                        remoteEndPoint.ReplaceLineEndings(string.Empty));
                     throw new SecurityException("Forbidden.");
                 }
 
@@ -606,8 +608,8 @@ namespace Jellyfin.Server.Implementations.Users
                 {
                     _logger.LogInformation(
                         "Authentication request for {UserName} is not allowed at this time due parental restrictions (IP: {IP}).",
-                        username,
-                        remoteEndPoint);
+                        username.ReplaceLineEndings(string.Empty),
+                        remoteEndPoint.ReplaceLineEndings(string.Empty));
                     throw new SecurityException("User is not allowed access at this time.");
                 }
 
@@ -629,7 +631,9 @@ namespace Jellyfin.Server.Implementations.Users
                         .Where(e => e.Id == user.Id)
                         .ExecuteUpdateAsync(e => e.SetProperty(f => f.InvalidLoginAttemptCount, 0))
                         .ConfigureAwait(false);
-                    _logger.LogInformation("Authentication request for {UserName} has succeeded.", user.Username);
+                    _logger.LogInformation(
+                        "Authentication request for {UserName} has succeeded.",
+                        user.Username.ReplaceLineEndings(string.Empty));
                 }
                 else
                 {
@@ -654,7 +658,7 @@ namespace Jellyfin.Server.Implementations.Users
                         await _eventManager.PublishAsync(new UserLockedOutEventArgs(user)).ConfigureAwait(false);
                         _logger.LogWarning(
                             "Disabling user {Username} due to {Attempts} unsuccessful login attempts.",
-                            user.Username,
+                            user.Username.ReplaceLineEndings(string.Empty),
                             user.InvalidLoginAttemptCount);
                     }
 
@@ -665,8 +669,8 @@ namespace Jellyfin.Server.Implementations.Users
 
                     _logger.LogInformation(
                         "Authentication request for {UserName} has been denied (IP: {IP}).",
-                        user.Username,
-                        remoteEndPoint);
+                        user.Username.ReplaceLineEndings(string.Empty),
+                        remoteEndPoint.ReplaceLineEndings(string.Empty));
                 }
             }
 

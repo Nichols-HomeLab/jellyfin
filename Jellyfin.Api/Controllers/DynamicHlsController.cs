@@ -1666,7 +1666,10 @@ public class DynamicHlsController : BaseJellyfinApiController
 
             if (await _transcodeSessionStore.TryCreateAsync(session, cancellationToken).ConfigureAwait(false))
             {
-                _logger.LogInformation("Instance {InstanceId} created HA transcode session {PlaySessionId}.", ownerPod, playSessionId);
+                _logger.LogInformation(
+                    "Instance {InstanceId} created HA transcode session {PlaySessionId}.",
+                    ownerPod.ReplaceLineEndings(string.Empty),
+                    playSessionId.ReplaceLineEndings(string.Empty));
                 return new TranscodeOwnership(true, null);
             }
 
@@ -1692,9 +1695,9 @@ public class DynamicHlsController : BaseJellyfinApiController
             {
                 _logger.LogInformation(
                     "Instance {InstanceId} recovered HA transcode session {PlaySessionId} from {PreviousOwner} at segment {SegmentIndex}.",
-                    ownerPod,
-                    playSessionId,
-                    existing.OwnerPod,
+                    ownerPod.ReplaceLineEndings(string.Empty),
+                    playSessionId.ReplaceLineEndings(string.Empty),
+                    existing.OwnerPod.ReplaceLineEndings(string.Empty),
                     existing.LastCompletedSegmentIndex);
                 return new TranscodeOwnership(true, existing);
             }
@@ -1703,7 +1706,10 @@ public class DynamicHlsController : BaseJellyfinApiController
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to acquire HLS session {PlaySessionId} in durable store.", playSessionId);
+            _logger.LogError(
+                ex,
+                "Failed to acquire HLS session {PlaySessionId} in durable store.",
+                playSessionId.ReplaceLineEndings(string.Empty));
             return new TranscodeOwnership(false, null);
         }
     }
@@ -1723,7 +1729,10 @@ public class DynamicHlsController : BaseJellyfinApiController
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to delete owned HLS session {PlaySessionId}.", playSessionId);
+            _logger.LogWarning(
+                ex,
+                "Failed to delete owned HLS session {PlaySessionId}.",
+                playSessionId.ReplaceLineEndings(string.Empty));
         }
     }
 
@@ -1770,20 +1779,26 @@ public class DynamicHlsController : BaseJellyfinApiController
                             {
                                 _logger.LogWarning(
                                     "Instance {InstanceId} lost ownership of HLS session {PlaySessionId}; stopping lease renewal.",
-                                    ownerPod,
-                                    playSessionId);
+                                    ownerPod.ReplaceLineEndings(string.Empty),
+                                    playSessionId.ReplaceLineEndings(string.Empty));
                                 break;
                             }
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogWarning(ex, "Failed to renew lease for HLS session {PlaySessionId}.", playSessionId);
+                            _logger.LogWarning(
+                                ex,
+                                "Failed to renew lease for HLS session {PlaySessionId}.",
+                                playSessionId.ReplaceLineEndings(string.Empty));
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Lease renewal loop for HLS session {PlaySessionId} encountered an unexpected error.", playSessionId);
+                    _logger.LogWarning(
+                        ex,
+                        "Lease renewal loop for HLS session {PlaySessionId} encountered an unexpected error.",
+                        playSessionId.ReplaceLineEndings(string.Empty));
                 }
 
                 // Do not delete the recovery record when the transcoder or node
@@ -2284,7 +2299,11 @@ public class DynamicHlsController : BaseJellyfinApiController
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to checkpoint HLS session {PlaySessionId} at segment {SegmentIndex}.", playSessionId, segmentIndex);
+                    _logger.LogWarning(
+                        ex,
+                        "Failed to checkpoint HLS session {PlaySessionId} at segment {SegmentIndex}.",
+                        playSessionId.ReplaceLineEndings(string.Empty),
+                        segmentIndex);
                 }
             }
         });

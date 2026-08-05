@@ -359,7 +359,11 @@ namespace Emby.Server.Implementations.Session
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to query live stream session {LiveStreamId}/{SessionId} from durable store.", liveStreamId, sessionIdOrPlaySessionId);
+                    _logger.LogWarning(
+                        ex,
+                        "Failed to query live stream session {LiveStreamId}/{SessionId} from durable store.",
+                        liveStreamId.ReplaceLineEndings(string.Empty),
+                        sessionIdOrPlaySessionId.ReplaceLineEndings(string.Empty));
                 }
 
                 if (durableRecord is not null)
@@ -377,7 +381,11 @@ namespace Emby.Server.Implementations.Session
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to delete live stream session {LiveStreamId}/{SessionId} from durable store.", liveStreamId, sessionIdOrPlaySessionId);
+                    _logger.LogWarning(
+                        ex,
+                        "Failed to delete live stream session {LiveStreamId}/{SessionId} from durable store.",
+                        liveStreamId.ReplaceLineEndings(string.Empty),
+                        sessionIdOrPlaySessionId.ReplaceLineEndings(string.Empty));
                 }
 
                 try
@@ -912,7 +920,11 @@ namespace Emby.Server.Implementations.Session
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to persist live stream session {LiveStreamId}/{SessionId} to durable store.", liveStreamId, sessionId);
+                _logger.LogWarning(
+                    ex,
+                    "Failed to persist live stream session {LiveStreamId}/{SessionId} to durable store.",
+                    liveStreamId.ReplaceLineEndings(string.Empty),
+                    sessionId.ReplaceLineEndings(string.Empty));
             }
         }
 
