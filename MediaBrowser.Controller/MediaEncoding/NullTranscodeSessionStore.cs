@@ -12,6 +12,9 @@ namespace MediaBrowser.Controller.MediaEncoding;
 public sealed class NullTranscodeSessionStore : ITranscodeSessionStore
 {
     /// <inheritdoc />
+    public bool IsEnabled => false;
+
+    /// <inheritdoc />
     public Task<TranscodeSession?> TryGetAsync(string playSessionId, CancellationToken cancellationToken = default)
         => Task.FromResult<TranscodeSession?>(null);
 

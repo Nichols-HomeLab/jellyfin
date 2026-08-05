@@ -21,21 +21,55 @@ public sealed class RedisTranscodeSessionStore : ITranscodeSessionStore
     private const string LiveStreamKeyPrefix = "jellyfin:livestream:";
 
     /// <summary>
-    /// Lua script for atomic takeover: reads the stored session, checks whether the lease has
-    /// expired (comparing <c>LeaseExpiresUtc.Ticks</c> against the caller-supplied current ticks),
-    /// and if expired, updates the owner and expiry before returning 1; returns 0 otherwise.
+    /// Lua script for atomic takeover: reads the stored session, checks its numeric Unix-time
+    /// lease expiry, and if expired updates the owner and expiry before returning 1.
     /// </summary>
     private const string TakeoverScript = @"
 local raw = redis.call('GET', KEYS[1])
 if not raw then return 0 end
 local session = cjson.decode(raw)
-local currentTicks = tonumber(ARGV[1])
-if session['LeaseExpiresUtc'] > currentTicks then return 0 end
+local currentMs = tonumber(ARGV[1])
+if tonumber(session['LeaseExpiresUnixTimeMilliseconds'] or 0) > currentMs then return 0 end
 session['OwnerPod'] = ARGV[2]
 local leaseDurationMs = tonumber(ARGV[3])
-local newTicks = currentTicks + (leaseDurationMs * 10000)
-session['LeaseExpiresUtc'] = newTicks
-redis.call('SET', KEYS[1], cjson.encode(session), 'PX', leaseDurationMs)
+session['LeaseExpiresUnixTimeMilliseconds'] = currentMs + leaseDurationMs
+redis.call('SET', KEYS[1], cjson.encode(session), 'PX', tonumber(ARGV[4]))
+return 1";
+
+    private const string RenewScript = @"
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local session = cjson.decode(raw)
+local currentMs = tonumber(ARGV[2])
+if session['OwnerPod'] ~= ARGV[1] then return 0 end
+if tonumber(session['LeaseExpiresUnixTimeMilliseconds'] or 0) <= currentMs then return 0 end
+session['LeaseExpiresUnixTimeMilliseconds'] = currentMs + tonumber(ARGV[3])
+redis.call('SET', KEYS[1], cjson.encode(session), 'PX', tonumber(ARGV[4]))
+return 1";
+
+    private const string DeleteIfOwnerScript = @"
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local session = cjson.decode(raw)
+if session['OwnerPod'] ~= ARGV[1] then return 0 end
+return redis.call('DEL', KEYS[1])";
+
+    private const string UpdateProgressScript = @"
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local session = cjson.decode(raw)
+if session['OwnerPod'] ~= ARGV[1] then return 0 end
+local segmentIndex = tonumber(ARGV[4])
+local playbackOffset = tonumber(ARGV[5])
+if segmentIndex >= tonumber(session['LastCompletedSegmentIndex'] or -1) then
+  session['LastCompletedSegmentIndex'] = segmentIndex
+end
+if playbackOffset >= tonumber(session['LastDurablePlaybackOffset'] or 0) then
+  session['LastDurablePlaybackOffset'] = playbackOffset
+end
+session['ManifestPath'] = ARGV[2]
+session['SegmentPathPrefix'] = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(session), 'PX', tonumber(ARGV[6]))
 return 1";
 
     private readonly IConnectionMultiplexer _redis;
@@ -61,13 +95,28 @@ return 1";
     }
 
     /// <inheritdoc />
+    public bool IsEnabled => true;
+
+    /// <inheritdoc />
     public async Task SetAsync(TranscodeSession session, CancellationToken cancellationToken = default)
     {
+        SetLeaseExpiry(session);
         var key = GetKey(session.PlaySessionId);
         var json = JsonSerializer.Serialize(session);
-        var leaseDurationMs = (long)_options.LeaseDurationSeconds * 1000;
-        await _db.StringSetAsync(key, json, TimeSpan.FromMilliseconds(leaseDurationMs)).ConfigureAwait(false);
+        await _db.StringSetAsync(key, json, GetRecoveryRetention()).ConfigureAwait(false);
         _logger.LogDebug("Set transcode session {PlaySessionId} in Redis.", session.PlaySessionId);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> TryCreateAsync(TranscodeSession session, CancellationToken cancellationToken = default)
+    {
+        SetLeaseExpiry(session);
+        var created = await _db.StringSetAsync(
+            GetKey(session.PlaySessionId),
+            JsonSerializer.Serialize(session),
+            GetRecoveryRetention(),
+            When.NotExists).ConfigureAwait(false);
+        return created;
     }
 
     /// <inheritdoc />
@@ -81,14 +130,7 @@ return 1";
         }
 
         var session = JsonSerializer.Deserialize<TranscodeSession>(raw.ToString());
-
-        // Check LeaseExpiresUtc in addition to Redis TTL to guard against the window between
-        // Redis TTL evaluation and the GET result being returned to the caller.
-        if (session is null || session.LeaseExpiresUtc <= DateTime.UtcNow)
-        {
-            return null;
-        }
-
+        NormalizeLeaseExpiry(session);
         return session;
     }
 
@@ -108,11 +150,26 @@ return 1";
             return;
         }
 
-        var leaseDurationMs = (long)_options.LeaseDurationSeconds * 1000;
-        session.LeaseExpiresUtc = DateTime.UtcNow.AddMilliseconds(leaseDurationMs);
+        SetLeaseExpiry(session);
         var json = JsonSerializer.Serialize(session);
-        await _db.StringSetAsync(key, json, TimeSpan.FromMilliseconds(leaseDurationMs)).ConfigureAwait(false);
+        await _db.StringSetAsync(key, json, GetRecoveryRetention()).ConfigureAwait(false);
         _logger.LogDebug("Renewed lease for transcode session {PlaySessionId}.", playSessionId);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> RenewLeaseAsync(string playSessionId, string ownerPod, CancellationToken cancellationToken = default)
+    {
+        var result = (long?)await _db.ScriptEvaluateAsync(
+            RenewScript,
+            new RedisKey[] { GetKey(playSessionId) },
+            new RedisValue[]
+            {
+                ownerPod,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                GetLeaseDurationMilliseconds(),
+                (long)GetRecoveryRetention().TotalMilliseconds
+            }).ConfigureAwait(false);
+        return result == 1;
     }
 
     /// <inheritdoc />
@@ -124,16 +181,57 @@ return 1";
     }
 
     /// <inheritdoc />
+    public async Task<bool> DeleteAsync(string playSessionId, string ownerPod, CancellationToken cancellationToken = default)
+    {
+        var result = (long?)await _db.ScriptEvaluateAsync(
+            DeleteIfOwnerScript,
+            new RedisKey[] { GetKey(playSessionId) },
+            new RedisValue[] { ownerPod }).ConfigureAwait(false);
+        return result == 1;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> UpdateProgressAsync(
+        string playSessionId,
+        string ownerPod,
+        string manifestPath,
+        string segmentPathPrefix,
+        int completedSegmentIndex,
+        long durablePlaybackOffset,
+        CancellationToken cancellationToken = default)
+    {
+        var result = (long?)await _db.ScriptEvaluateAsync(
+            UpdateProgressScript,
+            new RedisKey[] { GetKey(playSessionId) },
+            new RedisValue[]
+            {
+                ownerPod,
+                manifestPath,
+                segmentPathPrefix,
+                completedSegmentIndex,
+                durablePlaybackOffset,
+                (long)GetRecoveryRetention().TotalMilliseconds
+            }).ConfigureAwait(false);
+        return result == 1;
+    }
+
+    /// <inheritdoc />
     public async Task<bool> TryTakeoverAsync(string playSessionId, string claimingPod, CancellationToken cancellationToken = default)
     {
         var key = GetKey(playSessionId);
         var leaseDurationMs = (long)_options.LeaseDurationSeconds * 1000;
-        var currentTicks = DateTime.UtcNow.Ticks;
+        var currentMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         var result = (long?)await _db.ScriptEvaluateAsync(
             TakeoverScript,
             keys: new RedisKey[] { key },
-            values: new RedisValue[] { currentTicks, claimingPod, leaseDurationMs }).ConfigureAwait(false);
+            values: new RedisValue[]
+            {
+                currentMs,
+                claimingPod,
+                leaseDurationMs,
+                (long)GetRecoveryRetention().TotalMilliseconds
+            }).ConfigureAwait(false);
 
         var succeeded = result == 1;
         if (succeeded)
@@ -189,7 +287,8 @@ return 1";
                     continue;
                 }
 
-                if (session is not null)
+                NormalizeLeaseExpiry(session);
+                if (session is not null && session.LeaseExpiresUtc > DateTime.UtcNow)
                 {
                     sessions.Add(session);
                 }
@@ -266,5 +365,29 @@ return 1";
 
         // Fallback: delete just the key that was supplied.
         await _db.KeyDeleteAsync(key).ConfigureAwait(false);
+    }
+
+    private long GetLeaseDurationMilliseconds()
+        => Math.Max(1, _options.LeaseDurationSeconds) * 1000L;
+
+    private TimeSpan GetRecoveryRetention()
+        => TimeSpan.FromSeconds(Math.Max(
+            _options.RecoveryRetentionSeconds,
+            Math.Max(1, _options.LeaseDurationSeconds) * 2));
+
+    private void SetLeaseExpiry(TranscodeSession session)
+    {
+        session.LeaseExpiresUtc = DateTime.UtcNow.AddMilliseconds(GetLeaseDurationMilliseconds());
+        session.LeaseExpiresUnixTimeMilliseconds = new DateTimeOffset(session.LeaseExpiresUtc).ToUnixTimeMilliseconds();
+    }
+
+    private static void NormalizeLeaseExpiry(TranscodeSession? session)
+    {
+        if (session is not null && session.LeaseExpiresUnixTimeMilliseconds > 0)
+        {
+            session.LeaseExpiresUtc = DateTimeOffset
+                .FromUnixTimeMilliseconds(session.LeaseExpiresUnixTimeMilliseconds)
+                .UtcDateTime;
+        }
     }
 }

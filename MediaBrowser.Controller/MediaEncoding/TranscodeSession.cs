@@ -23,6 +23,12 @@ public sealed class TranscodeSession
     public DateTime LeaseExpiresUtc { get; set; }
 
     /// <summary>
+    /// Gets or sets the lease expiry as Unix milliseconds. Redis Lua scripts
+    /// use this numeric representation for atomic comparisons.
+    /// </summary>
+    public long LeaseExpiresUnixTimeMilliseconds { get; set; }
+
+    /// <summary>
     /// Gets or sets the absolute path to the HLS manifest (.m3u8) file on shared storage.
     /// </summary>
     public string ManifestPath { get; set; } = string.Empty;

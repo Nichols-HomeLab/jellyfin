@@ -28,7 +28,7 @@ FROM jellyfin/jellyfin:${JELLYFIN_VERSION}
 # Keep the client on the current PostgreSQL major version so it can connect to
 # current or older servers. xmlstarlet safely updates database.xml at startup.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl gnupg xmlstarlet \
+    && apt-get install --yes --no-install-recommends ca-certificates curl gnupg util-linux xmlstarlet \
     && install -d -m 0755 /usr/share/postgresql-common/pgdg \
     && curl --fail --silent --show-error https://www.postgresql.org/media/keys/ACCC4CF8.asc \
         | gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg \

@@ -37,6 +37,7 @@ services:
         Host=postgres;Port=5432;Database=jellyfin;Username=jellyfin;Password=change-me
       Jellyfin__TranscodeStore__RedisConnectionString: redis:6379,abortConnect=false
       Jellyfin__TranscodeStore__LeaseDurationSeconds: "30"
+      Jellyfin__TranscodeStore__RecoveryRetentionSeconds: "300"
       JELLYFIN_INSTANCE_ID: jellyfin-1
     volumes:
       - jellyfin-config:/config
