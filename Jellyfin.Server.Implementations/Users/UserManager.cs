@@ -638,8 +638,19 @@ namespace Jellyfin.Server.Implementations.Users
                     if (maxInvalidLogins.HasValue && user.InvalidLoginAttemptCount >= maxInvalidLogins)
                     {
                         user.SetPermission(PermissionKind.IsDisabled, true);
-                        await dbContext.SaveChangesAsync()
+                        var updatedPermissions = await dbContext.Permissions
+                            .Where(permission => permission.UserId == user.Id && permission.Kind == PermissionKind.IsDisabled)
+                            .ExecuteUpdateAsync(setters => setters.SetProperty(permission => permission.Value, true))
                             .ConfigureAwait(false);
+                        if (updatedPermissions == 0)
+                        {
+                            dbContext.Permissions.Add(new Permission(PermissionKind.IsDisabled, true)
+                            {
+                                UserId = user.Id
+                            });
+                            await dbContext.SaveChangesAsync().ConfigureAwait(false);
+                        }
+
                         await _eventManager.PublishAsync(new UserLockedOutEventArgs(user)).ConfigureAwait(false);
                         _logger.LogWarning(
                             "Disabling user {Username} due to {Attempts} unsuccessful login attempts.",

@@ -1837,12 +1837,9 @@ public class DynamicHlsController : BaseJellyfinApiController
         var outputExtension = EncodingHelper.GetSegmentFileExtension(state.Request.SegmentContainer);
         var outputTsArg = outputPrefix + "%d" + outputExtension;
 
-        // In HA mode, use shorter segments and a bounded rolling buffer for faster failover recovery.
-        // state.SegmentLength is already validated by the streaming pipeline; RecoverySegmentLengthSeconds
-        // comes from EncodingOptions (user-editable config) so it is clamped here.
-        var effectiveSegmentLength = isHaMode
-            ? Math.Clamp(_encodingOptions.RecoverySegmentLengthSeconds, 1, 6)
-            : state.SegmentLength;
+        // The playlist generator, segment URL runtime calculations, and ffmpeg
+        // must use the same duration. HA changes retention, not segment timing.
+        var effectiveSegmentLength = state.SegmentLength;
         var hlsListSize = isHaMode
             ? Math.Clamp(_encodingOptions.RecoverySegmentBufferCount, 2, 10)
             : 0;
