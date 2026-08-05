@@ -6,8 +6,11 @@ WORKDIR /src
 COPY . .
 
 RUN dotnet restore Jellyfin.Server/Jellyfin.Server.csproj \
+        --runtime linux-x64 \
     && dotnet publish Jellyfin.Server/Jellyfin.Server.csproj \
         --configuration Release \
+        --runtime linux-x64 \
+        --self-contained true \
         --no-restore \
         --output /out/server
 
