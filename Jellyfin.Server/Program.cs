@@ -24,6 +24,7 @@ using Jellyfin.Server.ServerSetupApp;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller;
+using MediaBrowser.Controller.Configuration;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -285,6 +286,10 @@ namespace Jellyfin.Server
                 .AddJellyfinDbContext(startupConfigurationManager, startupConfig)
                 .AddSingleton<IApplicationPaths>(appPaths)
                 .AddSingleton<ServerApplicationPaths>(appPaths)
+                // Required by NpgsqlDataSource factory in AddJellyfinDbContext when
+                // DatabaseType=Jellyfin-PostgreSQL — the factory resolves this from DI
+                // to read CustomProviderOptions and pool settings.
+                .AddSingleton<IServerConfigurationManager>(startupConfigurationManager)
                 .RegisterStartupLogger();
 
             migrationStartupServiceProvider.AddSingleton(migrationStartupServiceProvider);

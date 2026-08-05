@@ -1,91 +1,556 @@
-# Jellyfin HA + PostgreSQL fork
+# jellyfin-ha
 
-This branch combines Jellyfin 10.11.11, the `jellyfin-ha` Redis-backed
-transcode coordination changes, and the `Jellyfin.Pgsql` provider. See
-[README.HA-POSTGRESQL.md](README.HA-POSTGRESQL.md) for the supported build and
+This fork's production image combines the Redis-backed HA server with the
+optimized `Jellyfin.Pgsql` provider. See
+[README.HA-POSTGRESQL.md](README.HA-POSTGRESQL.md) for the supported image and
 runtime configuration.
 
-The original Jellyfin README follows.
+**A fork of [Jellyfin](https://github.com/jellyfin/jellyfin) adding high-availability transcoding support for multi-pod Kubernetes deployments.**
 
-<h1 align="center">Jellyfin</h1>
-<h3 align="center">The Free Software Media System</h3>
-
----
-
-<p align="center">
-<img alt="Logo Banner" src="https://raw.githubusercontent.com/jellyfin/jellyfin-ux/master/branding/SVG/banner-logo-solid.svg?sanitize=true"/>
-<br/>
-<br/>
-<a href="https://github.com/jellyfin/jellyfin">
-<img alt="GPL 2.0 License" src="https://img.shields.io/github/license/jellyfin/jellyfin.svg"/>
-</a>
-<a href="https://github.com/jellyfin/jellyfin/releases">
-<img alt="Current Release" src="https://img.shields.io/github/release/jellyfin/jellyfin.svg"/>
-</a>
-<a href="https://translate.jellyfin.org/projects/jellyfin/jellyfin-core/?utm_source=widget">
-<img alt="Translation Status" src="https://translate.jellyfin.org/widgets/jellyfin/-/jellyfin-core/svg-badge.svg"/>
-</a>
-<a href="https://hub.docker.com/r/jellyfin/jellyfin">
-<img alt="Docker Pull Count" src="https://img.shields.io/docker/pulls/jellyfin/jellyfin.svg"/>
-</a>
-<br/>
-<a href="https://opencollective.com/jellyfin">
-<img alt="Donate" src="https://img.shields.io/opencollective/all/jellyfin.svg?label=backers"/>
-</a>
-<a href="https://features.jellyfin.org">
-<img alt="Submit Feature Requests" src="https://img.shields.io/badge/fider-vote%20on%20features-success.svg"/>
-</a>
-<a href="https://matrix.to/#/#jellyfinorg:matrix.org">
-<img alt="Chat on Matrix" src="https://img.shields.io/matrix/jellyfinorg:matrix.org.svg?logo=matrix"/>
-</a>
-<a href="https://github.com/jellyfin/jellyfin/releases.atom">
-<img alt="Release RSS Feed" src="https://img.shields.io/badge/rss-releases-ffa500?logo=rss" />
-</a>
-<a href="https://github.com/jellyfin/jellyfin/commits/master.atom">
-<img alt="Master Commits RSS Feed" src="https://img.shields.io/badge/rss-commits-ffa500?logo=rss" />
-</a>
-</p>
+[![License: GPL v2](https://img.shields.io/badge/License-GPL_v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
+[![.NET 10](https://img.shields.io/badge/.NET-10.0-purple)](https://dotnet.microsoft.com/download/dotnet/10.0)
+[![Upstream](https://img.shields.io/badge/upstream-jellyfin%2Fjellyfin-informational)](https://github.com/jellyfin/jellyfin)
 
 ---
 
-Jellyfin is a Free Software Media System that puts you in control of managing and streaming your media. It is an alternative to the proprietary Emby and Plex, to provide media from a dedicated server to end-user devices via multiple apps. Jellyfin is descended from Emby's 3.5.2 release and ported to the .NET platform to enable full cross-platform support. 
+## What is this?
 
-There are no strings attached, no premium licenses or features, and no hidden agendas: just a team that wants to build something better and work together to achieve it. We welcome anyone who is interested in joining us in our quest!
+Jellyfin's default assumption is that exactly one server instance is running at a time. Transcode state is held entirely in-memory — when the process dies, so do all active HLS streams. For homelab deployments that want Kubernetes-managed redundancy (rolling restarts, node drain, pod rescheduling), that's a problem.
 
-For further details, please see [our documentation page](https://jellyfin.org/docs/). To receive the latest updates, get help with Jellyfin, and join the community, please visit [one of our communication channels](https://jellyfin.org/docs/general/getting-help). For more information about the project, please see our [about page](https://jellyfin.org/docs/general/about).
+This fork adds a thin HA layer on top of unmodified Jellyfin core:
 
-<strong>Want to get started?</strong><br/>
-Check out our <a href="https://jellyfin.org/downloads">downloads page</a> or our <a href="https://jellyfin.org/docs/general/installation/">installation guide</a>, then see our <a href="https://jellyfin.org/docs/general/quick-start">quick start guide</a>. You can also <a href="https://jellyfin.org/docs/general/installation/source">build from source</a>.<br/>
-
-<strong>Something not working right?</strong><br/>
-Open an <a href="https://jellyfin.org/docs/general/contributing/issues">Issue</a> on GitHub.<br/>
-
-<strong>Want to contribute?</strong><br/>
-Check out our <a href="https://jellyfin.org/contribute">contributing choose-your-own-adventure</a> to see where you can help, then see our <a href="https://jellyfin.org/docs/general/contributing/">contributing guide</a> and our <a href="https://jellyfin.org/docs/general/community-standards">community standards</a>.<br/>
-
-<strong>New idea or improvement?</strong><br/>
-Check out our <a href="https://features.jellyfin.org/?view=most-wanted">feature request hub</a>.<br/>
-
-<strong>Don't see Jellyfin in your language?</strong><br/>
-Check out our <a href="https://translate.jellyfin.org">Weblate instance</a> to help translate Jellyfin and its subprojects.<br/>
-
-<a href="https://translate.jellyfin.org/engage/jellyfin/?utm_source=widget">
-<img src="https://translate.jellyfin.org/widgets/jellyfin/-/jellyfin-web/multi-auto.svg" alt="Detailed Translation Status"/>
-</a>
+- **`ITranscodeSessionStore`** — a new interface for durable, distributed transcode session tracking
+- **`RedisTranscodeSessionStore`** — a Redis-backed implementation using atomic Lua takeover scripts and TTL-based lease expiry
+- **`NullTranscodeSessionStore`** — a no-op fallback so single-instance deployments work with zero configuration change
+- **Lease-aware `DeleteTranscodeFileTask`** — coordinates cleanup across replicas so a restarting pod doesn't delete segments another pod is actively streaming
+- **`SessionManager` HA recovery** — safe takeover of live HLS streams when a pod takes over after lease expiry
+- **PostgreSQL database provider** — alternative to SQLite for shared-database HA setups (experimental, under `src/Jellyfin.Database/Jellyfin.Database.Providers.PostgreSQL`)
 
 ---
 
-## Jellyfin Server
+## Architecture
 
-This repository contains the code for Jellyfin's backend server. Note that this is only one of many projects under the Jellyfin GitHub [organization](https://github.com/jellyfin/) on GitHub. If you want to contribute, you can start by checking out our [documentation](https://jellyfin.org/docs/general/contributing/index.html) to see what to work on.
+```
+┌─────────────┐     ┌─────────────┐
+│  Jellyfin   │     │  Jellyfin   │
+│   Pod A     │     │   Pod B     │
+│             │     │             │
+│ ┌─────────┐ │     │ ┌─────────┐ │
+│ │Transcode│ │     │ │Transcode│ │
+│ │Manager  │ │     │ │Manager  │ │
+│ └────┬────┘ │     │ └────┬────┘ │
+└──────┼──────┘     └──────┼──────┘
+       │                   │
+       └─────────┬─────────┘
+                 │
+         ┌───────▼───────┐
+         │  Redis        │   ← ITranscodeSessionStore
+         │  (lease store)│     TTL-based ownership
+         └───────────────┘
 
-## Server Development
+       ┌─────────────────────┐
+       │  Shared NAS / NFS   │   ← HLS segments + manifests
+       │  (shared storage)   │
+       └─────────────────────┘
+```
 
-These instructions will help you get set up with a local development environment in order to contribute to this repository. Before you start, please be sure to completely read our [guidelines on development contributions](https://jellyfin.org/docs/general/contributing/development.html). Note that this project is supported on all major operating systems except FreeBSD, which is still incompatible.
+**How takeover works:**
+
+1. Pod A starts an HLS transcode and writes a `TranscodeSession` to Redis with a 30-second lease.
+2. Pod A renews the lease every `LeaseDurationSeconds / 2` seconds.
+3. If Pod A dies, the lease expires in Redis after 30 seconds.
+4. Pod B receives a client request for the same play session, calls `TryTakeoverAsync`, and atomically claims ownership via a Lua script.
+5. Pod B resumes FFmpeg from the last durable segment index. The client sees a brief stutter, not an error.
+
+---
+
+## Quick Start
+
+### Single instance (no Redis)
+
+No configuration required. `NullTranscodeSessionStore` is used automatically. Behavior is identical to upstream Jellyfin.
+
+```bash
+dotnet run --project Jellyfin.Server/Jellyfin.Server.csproj -- \
+  --datadir /var/lib/jellyfin \
+  --webdir /usr/share/jellyfin/web
+```
+
+### HA mode with Redis
+
+Set the `Jellyfin:TranscodeStore:RedisConnectionString` configuration key. You can pass it as an environment variable, a `DOTNET_` prefixed env var, or in a JSON config file.
+
+**Environment variable:**
+
+```bash
+export Jellyfin__TranscodeStore__RedisConnectionString="redis:6379"
+export Jellyfin__TranscodeStore__LeaseDurationSeconds="30"
+
+dotnet run --project Jellyfin.Server/Jellyfin.Server.csproj -- \
+  --datadir /var/lib/jellyfin \
+  --webdir /usr/share/jellyfin/web
+```
+
+**`appsettings.json` section:**
+
+```json
+{
+  "Jellyfin": {
+    "TranscodeStore": {
+      "RedisConnectionString": "redis:6379,abortConnect=false",
+      "LeaseDurationSeconds": 30
+    }
+  }
+}
+```
+
+When `RedisConnectionString` is set, `RedisTranscodeSessionStore` is registered in DI. If the Redis connection fails at startup, the server throws and refuses to start — this is intentional so you don't silently fall back to broken HA behavior.
+
+---
+
+## Configuration Reference
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `Jellyfin:TranscodeStore:RedisConnectionString` | _(empty)_ | StackExchange.Redis connection string. Empty = single-instance mode. |
+| `Jellyfin:TranscodeStore:LeaseDurationSeconds` | `30` | How long a pod's transcode lease is valid before another pod may take over. |
+
+### Redis connection string examples
+
+```
+# Standalone Redis
+redis:6379
+
+# With password
+redis:6379,password=secret
+
+# With TLS
+redis.example.com:6380,ssl=true,abortConnect=false
+
+# Redis Sentinel
+sentinel-host:26379,serviceName=mymaster
+```
+
+Standard [StackExchange.Redis connection string format](https://stackexchange.github.io/StackExchange.Redis/Configuration) is accepted.
+
+---
+
+## Deployment
+
+> **This project is designed to run as a container.** Running it as a bare `dotnet` process is fine for development and testing, but the HA benefits only materialize when you have multiple replicas managed by a container orchestrator. Docker Compose gets you Redis + Jellyfin wired together locally. Kubernetes (k3s, k8s, or a managed cloud cluster) gets you the actual pod-death-and-recovery story.
+>
+> Don't have a Kubernetes cluster yet? [DigitalOcean Kubernetes](https://www.digitalocean.com/?refcode=b9012919f7ff&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge) is the fastest path to a managed cluster if you don't want to run your own nodes.
+
+---
+
+### Option 1 — Local HA with Docker Compose
+
+The simplest way to test the full HA stack locally: two Jellyfin replicas sharing a Redis instance and a local volume for transcode output.
+
+```yaml
+# docker-compose.yml
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  jellyfin-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime
+    environment:
+      Jellyfin__TranscodeStore__RedisConnectionString: "redis:6379,abortConnect=false"
+      Jellyfin__TranscodeStore__LeaseDurationSeconds: "30"
+      JELLYFIN_HA_POD_NAME: "jellyfin-1"
+    volumes:
+      - ./data/config:/config
+      - ./data/media:/media:ro
+      - transcode-tmp:/transcode
+    ports:
+      - "8096:8096"
+    depends_on:
+      - redis
+
+  jellyfin-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime
+    environment:
+      Jellyfin__TranscodeStore__RedisConnectionString: "redis:6379,abortConnect=false"
+      Jellyfin__TranscodeStore__LeaseDurationSeconds: "30"
+      JELLYFIN_HA_POD_NAME: "jellyfin-2"
+    volumes:
+      - ./data/config:/config
+      - ./data/media:/media:ro
+      - transcode-tmp:/transcode
+    ports:
+      - "8097:8096"
+    depends_on:
+      - redis
+
+volumes:
+  transcode-tmp:
+```
+
+Build the image first (the `dotnet publish` step runs outside Docker for I/O performance):
+
+```bash
+dotnet publish Jellyfin.Server/Jellyfin.Server.csproj \
+  --configuration Release \
+  --runtime linux-x64 \
+  --self-contained false \
+  --output ./publish-output
+
+docker compose up
+```
+
+Both replicas share the `transcode-tmp` volume and register sessions in Redis. Kill one container mid-stream (`docker kill jellyfin-1`) and the other takes over within `LeaseDurationSeconds`.
+
+---
+
+### Option 2 — Kubernetes (k3s / k8s)
+
+This is the intended production deployment. You need:
+
+1. A Kubernetes cluster (k3s, kubeadm, EKS, GKE, DigitalOcean Kubernetes, etc.)
+2. A Redis instance (in-cluster or managed)
+3. A `ReadWriteMany` storage class for shared transcode scratch space (NFS, Longhorn RWX, Ceph RBD, or a cloud-managed RWX PVC)
+
+#### Redis (in-cluster, standalone)
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: jellyfin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: jellyfin
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+```
+
+#### Redis connection secret
+
+```bash
+kubectl create secret generic jellyfin-redis \
+  --namespace jellyfin \
+  --from-literal=connection-string="redis.jellyfin.svc.cluster.local:6379,abortConnect=false"
+```
+
+#### Shared transcode PVC (RWX)
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jellyfin-transcode
+  namespace: jellyfin
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: longhorn  # or nfs-client, csi-driver-nfs, etc.
+  resources:
+    requests:
+      storage: 20Gi
+```
+
+#### Jellyfin Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jellyfin
+  namespace: jellyfin
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jellyfin
+  template:
+    metadata:
+      labels:
+        app: jellyfin
+    spec:
+      containers:
+        - name: jellyfin
+          image: your-registry/jellyfin-ha:latest
+          ports:
+            - containerPort: 8096
+          env:
+            - name: Jellyfin__TranscodeStore__RedisConnectionString
+              valueFrom:
+                secretKeyRef:
+                  name: jellyfin-redis
+                  key: connection-string
+            - name: Jellyfin__TranscodeStore__LeaseDurationSeconds
+              value: "30"
+            - name: JELLYFIN_HA_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: media
+              mountPath: /media
+              readOnly: true
+            - name: transcode
+              mountPath: /transcode
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8096
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8096
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: jellyfin-config   # RWO is fine — config is single-writer
+        - name: media
+          nfs:
+            server: your-nas.local
+            path: /media
+        - name: transcode
+          persistentVolumeClaim:
+            claimName: jellyfin-transcode  # Must be RWX
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jellyfin
+  namespace: jellyfin
+spec:
+  type: ClusterIP
+  selector:
+    app: jellyfin
+  ports:
+    - port: 8096
+      targetPort: 8096
+```
+
+#### Important: storage requirements
+
+| Volume | Access mode | Why |
+|--------|-------------|-----|
+| Config (`/config`) | `ReadWriteOnce` | One writer, SQLite DB lives here |
+| Media (`/media`) | `ReadOnlyMany` | All pods read the same library |
+| Transcode (`/transcode`) | **`ReadWriteMany`** | Pods read each other's HLS segments during takeover |
+
+The transcode volume is the critical one. If it's `ReadWriteOnce`, pod takeover will fail because Pod B cannot read the `.ts` segments Pod A wrote. Use NFS, Longhorn with RWX enabled, or a cloud-managed RWX storage class.
+
+#### Building the image
+
+```bash
+# Publish (run on host, not inside Docker)
+dotnet publish Jellyfin.Server/Jellyfin.Server.csproj \
+  --configuration Release \
+  --runtime linux-x64 \
+  --self-contained false \
+  --output ./publish-output
+
+# Build for amd64 (required for most clusters)
+docker buildx build \
+  --platform linux/amd64 \
+  --provenance=false \
+  -f Dockerfile.runtime \
+  -t your-registry/jellyfin-ha:latest \
+  --push .
+```
+
+> Note: `--provenance=false` is required if your cluster runs containerd (k3s, most kubeadm setups). Without it, Docker adds OCI attestation manifests that containerd cannot resolve.
+
+---
+
+### Option 3 — Bare dotnet (development only)
+
+For local development and testing without containers. HA mode still works — you just run two terminal sessions pointing at the same Redis and a shared local directory.
+
+**Terminal 1:**
+
+```bash
+export Jellyfin__TranscodeStore__RedisConnectionString="localhost:6379"
+export JELLYFIN_HA_POD_NAME="dev-pod-1"
+
+dotnet run --project Jellyfin.Server/Jellyfin.Server.csproj -- \
+  --datadir /tmp/jellyfin-1/data \
+  --cachedir /tmp/jellyfin-1/cache \
+  --transcodes /tmp/jellyfin-shared/transcode \
+  --webdir /usr/share/jellyfin/web \
+  --port 8096
+```
+
+**Terminal 2:**
+
+```bash
+export Jellyfin__TranscodeStore__RedisConnectionString="localhost:6379"
+export JELLYFIN_HA_POD_NAME="dev-pod-2"
+
+dotnet run --project Jellyfin.Server/Jellyfin.Server.csproj -- \
+  --datadir /tmp/jellyfin-2/data \
+  --cachedir /tmp/jellyfin-2/cache \
+  --transcodes /tmp/jellyfin-shared/transcode \
+  --webdir /usr/share/jellyfin/web \
+  --port 8097
+```
+
+Both instances share `/tmp/jellyfin-shared/transcode`. Kill one process mid-stream to test takeover. Start a local Redis with `redis-server` or `docker run -p 6379:6379 redis:7-alpine`.
+
+---
+
+## PostgreSQL (experimental)
+
+This fork includes a PostgreSQL database provider under `src/Jellyfin.Database/Jellyfin.Database.Providers.PostgreSQL`. It is experimental — the SQLite provider remains the default and the recommended choice for most deployments.
+
+To use PostgreSQL, set the migration provider at startup and run migrations:
+
+```bash
+dotnet ef migrations add InitialCreate \
+  --project "src/Jellyfin.Database/Jellyfin.Database.Providers.PostgreSQL" \
+  -- --migration-provider Jellyfin-PostgreSQL
+```
+
+See `src/Jellyfin.Database/readme.md` for full migration instructions.
+
+---
+
+## Building and Testing
 
 ### Prerequisites
 
-Before the project can be built, you must first install the [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet) on your system.
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+
+### Build
+
+```bash
+dotnet build Jellyfin.Server/Jellyfin.Server.csproj
+```
+
+### Run all tests
+
+```bash
+dotnet test Jellyfin.sln \
+  --configuration Release \
+  --filter "Category!=RequiresDocker&FullyQualifiedName!~Integration"
+```
+
+### Run HA-specific tests
+
+The transcode session store and HA recovery tests live in:
+
+- `tests/Jellyfin.Server.Implementations.Tests/MediaEncoding/RedisTranscodeSessionStoreTests.cs`
+- `tests/Jellyfin.MediaEncoding.Tests/Fakes/InMemoryTranscodeSessionStore.cs`
+
+```bash
+dotnet test tests/Jellyfin.Server.Implementations.Tests \
+  --configuration Release \
+  --filter "FullyQualifiedName~TranscodeSession"
+```
+
+### Run with code coverage
+
+```bash
+dotnet test Jellyfin.sln \
+  --configuration Release \
+  --collect:"XPlat Code Coverage" \
+  --settings tests/coverletArgs.runsettings
+```
+
+---
+
+## Project Structure
+
+```
+MediaBrowser.Controller/MediaEncoding/
+  ITranscodeSessionStore.cs        ← Interface (DI contract)
+  TranscodeSession.cs              ← Session record model
+  TranscodeStoreOptions.cs         ← Configuration options
+  NullTranscodeSessionStore.cs     ← No-op, single-instance fallback
+
+Emby.Server.Implementations/MediaEncoding/
+  RedisTranscodeSessionStore.cs    ← Redis-backed HA implementation
+
+src/Jellyfin.Database/
+  Jellyfin.Database.Providers.PostgreSQL/  ← Experimental PostgreSQL provider
+
+tests/
+  Jellyfin.Server.Implementations.Tests/MediaEncoding/
+    RedisTranscodeSessionStoreTests.cs
+  Jellyfin.MediaEncoding.Tests/Fakes/
+    InMemoryTranscodeSessionStore.cs
+```
+
+---
+
+## Contributing
+
+This is a personal experiment, not an officially maintained fork. Issues and PRs are welcome but response time may vary.
+
+If you're interested in getting proper HA transcoding into upstream Jellyfin, that conversation belongs in the [upstream repo](https://github.com/jellyfin/jellyfin). The changes here are deliberately narrow and designed to be upstream-friendly if there's maintainer interest.
+
+**Code conventions** follow the upstream Jellyfin rules:
+- `async`/`await` everywhere — no `.Result` or `.Wait()`
+- All public members need XML doc comments
+- Use `Directory.Packages.props` for NuGet versions — never add `Version=` to a `<PackageReference>`
+- `.NET 10` required
+- Warnings are treated as errors
+
+---
+
+## Relationship to upstream
+
+This fork tracks [jellyfin/jellyfin](https://github.com/jellyfin/jellyfin) `master`. The HA additions are intentionally isolated to:
+
+1. New interfaces and models in `MediaBrowser.Controller`
+2. New implementations in `Emby.Server.Implementations`
+3. DI wiring in `Jellyfin.Server/CoreAppHost.cs`
+4. New test projects
+
+No core Jellyfin logic was modified — only extended via existing DI extension points.
+
+---
+
+## License
+
+GPL-2.0, same as upstream Jellyfin. See [LICENSE](LICENSE).
+
+---
+
+*Upstream README preserved below for reference.*
+
+---
 
 Instructions to run this project from the command line are included here, but you will also need to install an IDE if you want to debug the server while it is running. Any IDE that supports .NET 6 development will work, but two options are recent versions of [Visual Studio](https://visualstudio.microsoft.com/downloads/) (at least 2022) and [Visual Studio Code](https://code.visualstudio.com/Download).
 
@@ -103,13 +568,12 @@ git clone https://github.com/jellyfin/jellyfin.git
 
 The server is configured to host the static files required for the [web client](https://github.com/jellyfin/jellyfin-web) in addition to serving the backend by default. Before you can run the server, you will need to get a copy of the web client since they are not included in this repository directly.
 
-Note that it is also possible to [host the web client separately](#hosting-the-web-client-separately) from the web server with some additional configuration, in which case you can skip this step.
+Note that it is recommended for development to [host the web client separately](#hosting-the-web-client-separately) from the web server with some additional configuration, in which case you can skip this step.
 
-There are three options to get the files for the web client.
+There are two options to get the files for the web client.
 
-1. Download one of the finished builds from the [Azure DevOps pipeline](https://dev.azure.com/jellyfin-project/jellyfin/_build?definitionId=27). You can download the build for a specific release by looking at the [branches tab](https://dev.azure.com/jellyfin-project/jellyfin/_build?definitionId=27&_a=summary&repositoryFilter=6&view=branches) of the pipelines page.
-2. Build them from source following the instructions on the [jellyfin-web repository](https://github.com/jellyfin/jellyfin-web)
-3. Get the pre-built files from an existing installation of the server. For example, with a Windows server installation the client files are located at `C:\Program Files\Jellyfin\Server\jellyfin-web`
+1. Build them from source following the instructions on the [jellyfin-web repository](https://github.com/jellyfin/jellyfin-web)
+2. Get the pre-built files from an existing installation of the server. For example, with a Windows server installation the client files are located at `C:\Program Files\Jellyfin\Server\jellyfin-web`
 
 ### Running The Server
 
@@ -142,7 +606,7 @@ A second option is to build the project and then run the resulting executable fi
 
 ```bash
 dotnet build                       # Build the project
-cd Jellyfin.Server/bin/Debug/net9.0 # Change into the build output directory
+cd Jellyfin.Server/bin/Debug/net10.0 # Change into the build output directory
 ```
 
 2. Execute the build output. On Linux, Mac, etc. use `./jellyfin` and on Windows use `jellyfin.exe`.
@@ -207,5 +671,5 @@ This project is supported by:
 <br/>
 <a href="https://www.digitalocean.com"><img src="https://opensource.nyc3.cdn.digitaloceanspaces.com/attribution/assets/SVG/DO_Logo_horizontal_blue.svg" height="50px" alt="DigitalOcean"></a>
     &nbsp;
-<a href="https://www.jetbrains.com"><img src="https://gist.githubusercontent.com/anthonylavado/e8b2403deee9581e0b4cb8cd675af7db/raw/fa104b7d73f759d7262794b94569f1b89df41c0b/jetbrains.svg" height="50px" alt="JetBrains logo"></a>
+<a href="https://www.jetbrains.com"><img src="https://gist.githubusercontent.com/anthonylavado/e8b2403deee9581e0b4cb8cd675af7db/raw/199ae22980ef5da64882ec2de3e8e5c03fe535b8/jetbrains.svg" height="50px" alt="JetBrains logo"></a>
 </p>
