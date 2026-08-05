@@ -1,3 +1,12 @@
+# Jellyfin HA + PostgreSQL fork
+
+This branch combines Jellyfin 10.11.11, the `jellyfin-ha` Redis-backed
+transcode coordination changes, and the `Jellyfin.Pgsql` provider. See
+[README.HA-POSTGRESQL.md](README.HA-POSTGRESQL.md) for the supported build and
+runtime configuration.
+
+The original Jellyfin README follows.
+
 <h1 align="center">Jellyfin</h1>
 <h3 align="center">The Free Software Media System</h3>
 
