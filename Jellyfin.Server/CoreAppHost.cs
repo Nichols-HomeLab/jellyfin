@@ -109,11 +109,20 @@ namespace Jellyfin.Server
             var redisConnectionString = _startupConfig["Jellyfin:TranscodeStore:RedisConnectionString"];
             if (!string.IsNullOrEmpty(redisConnectionString))
             {
+                var redisConfiguration = StackExchange.Redis.ConfigurationOptions.Parse(redisConnectionString);
+                var redisPassword = Environment.GetEnvironmentVariable("TRANSCODE_STORE_REDIS_PASSWORD");
+                if (!string.IsNullOrEmpty(redisPassword))
+                {
+                    // Keep the password outside the JELLYFIN_ namespace because
+                    // Jellyfin reports those environment values during startup.
+                    redisConfiguration.Password = redisPassword;
+                }
+
                 serviceCollection.AddSingleton<IConnectionMultiplexer>(sp =>
                 {
                     try
                     {
-                        return ConnectionMultiplexer.Connect(redisConnectionString);
+                        return ConnectionMultiplexer.Connect(redisConfiguration);
                     }
                     catch (Exception ex)
                     {
