@@ -61,7 +61,7 @@ redis:
 
   image:
     repository: redis
-    tag: "7.4.2-alpine3.21"
+    tag: "7.4.10-alpine3.21"
     pullPolicy: IfNotPresent
 
   # -- Maximum memory for Redis to use.
