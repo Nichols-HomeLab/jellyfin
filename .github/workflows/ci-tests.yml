@@ -15,7 +15,7 @@ jobs:
   run-tests:
     runs-on: [self-hosted, k3s, linux, amd64]
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       # Install .NET — use GITHUB_ENV (not GITHUB_PATH) to set PATH because
       # ARC self-hosted runner pods don't pick up GITHUB_PATH between steps.
@@ -38,7 +38,7 @@ jobs:
             --filter "Category!=RequiresDocker&FullyQualifiedName!~Integration"
 
       - name: Merge code coverage results
-        uses: danielpalme/ReportGenerator-GitHub-Action@ee0ae774f6d3afedcbd1683c1ab21b83670bdf8e # v5.5.1
+        uses: danielpalme/ReportGenerator-GitHub-Action@d3ebf1f760f7d8ab92cc44d9bcfee7ad73722a31 # v5.5.11
         with:
           reports: "**/coverage.cobertura.xml"
           targetdir: "merged/"
@@ -54,7 +54,7 @@ jobs:
   run-phase5-tests:
     runs-on: [self-hosted, k3s, linux, amd64]
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install .NET SDK
         run: |
@@ -95,7 +95,7 @@ jobs:
             --filter "Category!=RequiresDocker"
 
       - name: Merge Phase 5 code coverage results
-        uses: danielpalme/ReportGenerator-GitHub-Action@2a7030e9775aab6c78e80cb66843051acdacee3e # v5.5.2
+        uses: danielpalme/ReportGenerator-GitHub-Action@d3ebf1f760f7d8ab92cc44d9bcfee7ad73722a31 # v5.5.11
         with:
           reports: "**/coverage.cobertura.xml"
           targetdir: "merged-phase5/"
