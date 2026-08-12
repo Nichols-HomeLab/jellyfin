@@ -34,7 +34,11 @@ jobs:
         uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
         with:
           registry: git.nicholstech.org
-          username: ${{ github.actor }}
+          # act_runner 0.6.1 renders github.actor as "%!t(string=admin)"
+          # when it is passed directly to an action input. Gitea's per-run
+          # token is issued for the repository owner, so use that stable
+          # identity until the runner expression bug is upgraded away.
+          username: admin
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set image metadata
