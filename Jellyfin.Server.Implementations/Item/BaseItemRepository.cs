@@ -145,7 +145,7 @@ public sealed class BaseItemRepository
             var mergedUserData = userDataToDetach
                 .Concat(existingPlaceholderData)
                 .GroupBy(e => new { e.UserId, e.CustomDataKey })
-                .Select(group => MergeUserDataForPlaceholder(group, date));
+                .Select(group => MergeUserData(group, PlaceholderId, date));
             context.UserData.AddRange(mergedUserData);
         }
 
@@ -173,7 +173,7 @@ public sealed class BaseItemRepository
         transaction.Commit();
     }
 
-    internal static UserData MergeUserDataForPlaceholder(IEnumerable<UserData> entries, DateTime? retentionDate)
+    internal static UserData MergeUserData(IEnumerable<UserData> entries, Guid targetItemId, DateTime? retentionDate)
     {
         var records = entries.ToArray();
         if (records.Length == 0)
@@ -188,7 +188,7 @@ public sealed class BaseItemRepository
 
         return new UserData
         {
-            ItemId = PlaceholderId,
+            ItemId = targetItemId,
             Item = null,
             UserId = mostRecent.UserId,
             User = null,
@@ -910,14 +910,41 @@ public sealed class BaseItemRepository
                 var userKeys = item.GetUserDataKeys().ToArray();
                 var retentionDate = (DateTime?)null;
 
-                await dbContext.UserData
+                var placeholderData = await dbContext.UserData
+                    .AsNoTracking()
                     .Where(e => e.ItemId == PlaceholderId)
                     .Where(e => userKeys.Contains(e.CustomDataKey))
-                    .ExecuteUpdateAsync(
-                        e => e
-                            .SetProperty(f => f.ItemId, item.Id)
-                            .SetProperty(f => f.RetentionDate, retentionDate),
-                        cancellationToken).ConfigureAwait(false);
+                    .ToArrayAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                if (placeholderData.Length > 0)
+                {
+                    var affectedUsers = placeholderData.Select(e => e.UserId).Distinct().ToArray();
+                    var affectedKeys = placeholderData
+                        .Select(e => new { e.UserId, e.CustomDataKey })
+                        .ToHashSet();
+                    var conflictingItemData = await dbContext.UserData
+                        .Where(e => e.ItemId == item.Id && affectedUsers.Contains(e.UserId))
+                        .ToArrayAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    conflictingItemData = conflictingItemData
+                        .Where(e => affectedKeys.Contains(new { e.UserId, e.CustomDataKey }))
+                        .ToArray();
+
+                    await dbContext.UserData
+                        .Where(e => e.ItemId == PlaceholderId)
+                        .Where(e => userKeys.Contains(e.CustomDataKey))
+                        .ExecuteDeleteAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    dbContext.UserData.RemoveRange(conflictingItemData);
+                    await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+                    var mergedUserData = placeholderData
+                        .Concat(conflictingItemData)
+                        .GroupBy(e => new { e.UserId, e.CustomDataKey })
+                        .Select(group => MergeUserData(group, item.Id, retentionDate));
+                    dbContext.UserData.AddRange(mergedUserData);
+                    await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                }
 
                 // Rehydrate the cached userdata
                 item.UserData = await dbContext.UserData

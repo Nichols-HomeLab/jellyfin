@@ -56,7 +56,7 @@ public class BaseItemQueryGenerationTests
     }
 
     [Fact]
-    public void MergeUserDataForPlaceholderPreservesStrongestWatchState()
+    public void MergeUserDataPreservesStrongestWatchStateAtRequestedTarget()
     {
         var userId = Guid.Parse("10000000-0000-0000-0000-000000000001");
         var older = new UserData
@@ -84,10 +84,11 @@ public class BaseItemQueryGenerationTests
             LastPlayedDate = new DateTime(2026, 8, 2, 0, 0, 0, DateTimeKind.Utc)
         };
         var retentionDate = new DateTime(2026, 8, 12, 0, 0, 0, DateTimeKind.Utc);
+        var targetItemId = Guid.Parse("30000000-0000-0000-0000-000000000001");
 
-        var result = BaseItemRepository.MergeUserDataForPlaceholder([older, newer], retentionDate);
+        var result = BaseItemRepository.MergeUserData([older, newer], targetItemId, retentionDate);
 
-        Assert.Equal(BaseItemRepository.PlaceholderId, result.ItemId);
+        Assert.Equal(targetItemId, result.ItemId);
         Assert.Equal(userId, result.UserId);
         Assert.Equal("episode-key", result.CustomDataKey);
         Assert.True(result.Played);
