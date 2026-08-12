@@ -84,6 +84,17 @@ jobs:
             -p:TreatWarningsAsErrors=false \
             --output ./publish-output
 
+      - name: Connect to the nested Docker daemon
+        run: |
+          # act_runner creates this job inside the runner's sibling DinD
+          # daemon. The daemon is listening on the job bridge gateway, not on
+          # this container's /var/run/docker.sock.
+          docker_gateway="$(ip route show default | awk '{print $3; exit}')"
+          test -n "${docker_gateway}"
+          docker_host="tcp://${docker_gateway}:2375"
+          DOCKER_HOST="${docker_host}" docker version >/dev/null
+          echo "DOCKER_HOST=${docker_host}" >> "$GITHUB_ENV"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
