@@ -64,4 +64,35 @@ public sealed class RedisConnectionManagerTests
 
         Assert.Equal(1, factoryCalls);
     }
+
+    /// <summary>
+    /// Recognizes a writable-endpoint failure wrapped by an async Redis operation.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "UnitTest")]
+    public async Task ExecuteAsync_WrappedReadOnlyFailure_ReconnectsAndRetriesOnce()
+    {
+        var first = new Mock<IConnectionMultiplexer>();
+        var second = new Mock<IConnectionMultiplexer>();
+        var factoryCalls = 0;
+        using var manager = new RedisConnectionManager(
+            () => ++factoryCalls == 1 ? first.Object : second.Object,
+            NullLogger<RedisConnectionManager>.Instance);
+
+        var result = await manager.ExecuteAsync(connection =>
+        {
+            if (ReferenceEquals(connection, first.Object))
+            {
+                throw new InvalidOperationException(
+                    "Redis operation failed.",
+                    new RedisServerException("READONLY You can't write against a read only replica."));
+            }
+
+            return Task.FromResult(84);
+        }).ConfigureAwait(false);
+
+        Assert.Equal(84, result);
+        Assert.Equal(2, factoryCalls);
+        first.Verify(connection => connection.Dispose(), Times.Once);
+    }
 }
