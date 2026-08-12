@@ -133,6 +133,19 @@ sentinel-host:26379,serviceName=mymaster
 
 Standard [StackExchange.Redis connection string format](https://stackexchange.github.io/StackExchange.Redis/Configuration) is accepted.
 
+When a Kubernetes Service selects only the writable Redis pod, keep the
+Service DNS name in the connection string rather than a pod IP. An established
+TCP connection can remain attached to the former primary after the Service
+endpoint changes. The transcode store detects Redis `READONLY` and
+`requires writable` failures, creates a fresh multiplexer so DNS and Service
+routing are evaluated again, and retries the failed idempotent store operation
+once. Concurrent failures share the same replacement connection.
+
+Sentinel mode is also supported through `serviceName`, but the Sentinel and
+Redis data-plane authentication settings must be compatible with
+StackExchange.Redis. The Kubernetes Service reconnect path is appropriate when
+Sentinel does not use the same credentials as the Redis data nodes.
+
 ---
 
 ## Deployment
