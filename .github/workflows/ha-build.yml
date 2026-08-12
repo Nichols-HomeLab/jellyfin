@@ -39,7 +39,9 @@ jobs:
           # token is issued for the repository owner, so use that stable
           # identity until the runner expression bug is upgraded away.
           username: admin
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # Gitea's per-run token is repository-scoped but does not carry the
+          # package scope required by the container registry.
+          password: ${{ secrets.REGISTRY_TOKEN }}
 
       - name: Set image metadata
         id: meta
