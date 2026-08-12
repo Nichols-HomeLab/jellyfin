@@ -35,7 +35,7 @@ public sealed class RedisConnectionManagerTests
             }
 
             return Task.FromResult(42);
-        }).ConfigureAwait(false);
+        });
 
         Assert.Equal(42, result);
         Assert.Equal(2, factoryCalls);
@@ -60,7 +60,7 @@ public sealed class RedisConnectionManagerTests
             NullLogger<RedisConnectionManager>.Instance);
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => manager.ExecuteAsync<int>(_ => throw new InvalidOperationException("application failure"))).ConfigureAwait(false);
+            () => manager.ExecuteAsync<int>(_ => throw new InvalidOperationException("application failure")));
 
         Assert.Equal(1, factoryCalls);
     }
@@ -89,7 +89,7 @@ public sealed class RedisConnectionManagerTests
             }
 
             return Task.FromResult(84);
-        }).ConfigureAwait(false);
+        });
 
         Assert.Equal(84, result);
         Assert.Equal(2, factoryCalls);

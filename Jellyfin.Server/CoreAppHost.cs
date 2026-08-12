@@ -116,7 +116,7 @@ namespace Jellyfin.Server
                         return new RedisConnectionManager(
                             () =>
                             {
-                                var redisConfiguration = ConfigurationOptions.Parse(redisConnectionString);
+                                var redisConfiguration = StackExchange.Redis.ConfigurationOptions.Parse(redisConnectionString);
                                 var redisPassword = Environment.GetEnvironmentVariable("TRANSCODE_STORE_REDIS_PASSWORD");
                                 if (!string.IsNullOrEmpty(redisPassword))
                                 {
