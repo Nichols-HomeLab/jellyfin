@@ -57,8 +57,10 @@ jobs:
         run: |
           DOTNET_INSTALL_DIR="$HOME/.dotnet"
           mkdir -p "$DOTNET_INSTALL_DIR"
-          if ! "$DOTNET_INSTALL_DIR/dotnet" --version 2>/dev/null | grep -q "^10\\."; then
-            curl -fsSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin --channel 10.0 --install-dir "$DOTNET_INSTALL_DIR"
+          # global.json pins the server build to .NET 9. Installing only the
+          # .NET 10 SDK leaves dotnet unable to resolve that pinned SDK.
+          if ! "$DOTNET_INSTALL_DIR/dotnet" --list-sdks 2>/dev/null | grep -q "^9\\."; then
+            curl -fsSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin --channel 9.0 --install-dir "$DOTNET_INSTALL_DIR"
           fi
           echo "DOTNET_ROOT=$DOTNET_INSTALL_DIR" >> "$GITHUB_ENV"
           echo "PATH=$DOTNET_INSTALL_DIR:$PATH" >> "$GITHUB_ENV"
