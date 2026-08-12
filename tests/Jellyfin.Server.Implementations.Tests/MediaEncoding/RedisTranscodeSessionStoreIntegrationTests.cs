@@ -24,9 +24,11 @@ public sealed class RedisTranscodeSessionStoreIntegrationTests
         var connectionString = Environment.GetEnvironmentVariable("JELLYFIN_TEST_REDIS");
         Skip.If(string.IsNullOrWhiteSpace(connectionString), "Set JELLYFIN_TEST_REDIS to run Redis integration tests.");
 
-        await using var redis = await ConnectionMultiplexer.ConnectAsync(connectionString).ConfigureAwait(false);
+        using var redisManager = new RedisConnectionManager(
+            () => ConnectionMultiplexer.Connect(connectionString),
+            NullLogger<RedisConnectionManager>.Instance);
         var store = new RedisTranscodeSessionStore(
-            redis,
+            redisManager,
             Options.Create(new TranscodeStoreOptions
             {
                 LeaseDurationSeconds = 1,

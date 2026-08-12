@@ -72,24 +72,22 @@ session['SegmentPathPrefix'] = ARGV[3]
 redis.call('SET', KEYS[1], cjson.encode(session), 'PX', tonumber(ARGV[6]))
 return 1";
 
-    private readonly IConnectionMultiplexer _redis;
-    private readonly IDatabase _db;
+    private readonly RedisConnectionManager _redis;
     private readonly TranscodeStoreOptions _options;
     private readonly ILogger<RedisTranscodeSessionStore> _logger;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="RedisTranscodeSessionStore"/> class.
     /// </summary>
-    /// <param name="redis">The Redis connection multiplexer.</param>
+    /// <param name="redis">The managed Redis connection.</param>
     /// <param name="options">The transcode store configuration options.</param>
     /// <param name="logger">The logger.</param>
     public RedisTranscodeSessionStore(
-        IConnectionMultiplexer redis,
+        RedisConnectionManager redis,
         IOptions<TranscodeStoreOptions> options,
         ILogger<RedisTranscodeSessionStore> logger)
     {
         _redis = redis;
-        _db = redis.GetDatabase();
         _options = options.Value;
         _logger = logger;
     }
@@ -103,7 +101,7 @@ return 1";
         SetLeaseExpiry(session);
         var key = GetKey(session.PlaySessionId);
         var json = JsonSerializer.Serialize(session);
-        await _db.StringSetAsync(key, json, GetRecoveryRetention()).ConfigureAwait(false);
+        await ExecuteAsync(db => db.StringSetAsync(key, json, GetRecoveryRetention()), cancellationToken).ConfigureAwait(false);
         _logger.LogDebug("Set transcode session {PlaySessionId} in Redis.", session.PlaySessionId.ReplaceLineEndings(string.Empty));
     }
 
@@ -111,11 +109,13 @@ return 1";
     public async Task<bool> TryCreateAsync(TranscodeSession session, CancellationToken cancellationToken = default)
     {
         SetLeaseExpiry(session);
-        var created = await _db.StringSetAsync(
-            GetKey(session.PlaySessionId),
-            JsonSerializer.Serialize(session),
-            GetRecoveryRetention(),
-            When.NotExists).ConfigureAwait(false);
+        var created = await ExecuteAsync(
+            db => db.StringSetAsync(
+                GetKey(session.PlaySessionId),
+                JsonSerializer.Serialize(session),
+                GetRecoveryRetention(),
+                When.NotExists),
+            cancellationToken).ConfigureAwait(false);
         return created;
     }
 
@@ -123,7 +123,7 @@ return 1";
     public async Task<TranscodeSession?> TryGetAsync(string playSessionId, CancellationToken cancellationToken = default)
     {
         var key = GetKey(playSessionId);
-        var raw = await _db.StringGetAsync(key).ConfigureAwait(false);
+        var raw = await ExecuteAsync(db => db.StringGetAsync(key), cancellationToken).ConfigureAwait(false);
         if (!raw.HasValue)
         {
             return null;
@@ -138,7 +138,7 @@ return 1";
     public async Task RenewLeaseAsync(string playSessionId, CancellationToken cancellationToken = default)
     {
         var key = GetKey(playSessionId);
-        var raw = await _db.StringGetAsync(key).ConfigureAwait(false);
+        var raw = await ExecuteAsync(db => db.StringGetAsync(key), cancellationToken).ConfigureAwait(false);
         if (!raw.HasValue)
         {
             return;
@@ -152,23 +152,25 @@ return 1";
 
         SetLeaseExpiry(session);
         var json = JsonSerializer.Serialize(session);
-        await _db.StringSetAsync(key, json, GetRecoveryRetention()).ConfigureAwait(false);
+        await ExecuteAsync(db => db.StringSetAsync(key, json, GetRecoveryRetention()), cancellationToken).ConfigureAwait(false);
         _logger.LogDebug("Renewed lease for transcode session {PlaySessionId}.", playSessionId.ReplaceLineEndings(string.Empty));
     }
 
     /// <inheritdoc />
     public async Task<bool> RenewLeaseAsync(string playSessionId, string ownerPod, CancellationToken cancellationToken = default)
     {
-        var result = (long?)await _db.ScriptEvaluateAsync(
-            RenewScript,
-            new RedisKey[] { GetKey(playSessionId) },
-            new RedisValue[]
-            {
-                ownerPod,
-                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                GetLeaseDurationMilliseconds(),
-                (long)GetRecoveryRetention().TotalMilliseconds
-            }).ConfigureAwait(false);
+        var result = (long?)await ExecuteAsync(
+            db => db.ScriptEvaluateAsync(
+                RenewScript,
+                new RedisKey[] { GetKey(playSessionId) },
+                new RedisValue[]
+                {
+                    ownerPod,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    GetLeaseDurationMilliseconds(),
+                    (long)GetRecoveryRetention().TotalMilliseconds
+                }),
+            cancellationToken).ConfigureAwait(false);
         return result == 1;
     }
 
@@ -176,17 +178,19 @@ return 1";
     public async Task DeleteAsync(string playSessionId, CancellationToken cancellationToken = default)
     {
         var key = GetKey(playSessionId);
-        await _db.KeyDeleteAsync(key).ConfigureAwait(false);
+        await ExecuteAsync(db => db.KeyDeleteAsync(key), cancellationToken).ConfigureAwait(false);
         _logger.LogDebug("Deleted transcode session {PlaySessionId} from Redis.", playSessionId.ReplaceLineEndings(string.Empty));
     }
 
     /// <inheritdoc />
     public async Task<bool> DeleteAsync(string playSessionId, string ownerPod, CancellationToken cancellationToken = default)
     {
-        var result = (long?)await _db.ScriptEvaluateAsync(
-            DeleteIfOwnerScript,
-            new RedisKey[] { GetKey(playSessionId) },
-            new RedisValue[] { ownerPod }).ConfigureAwait(false);
+        var result = (long?)await ExecuteAsync(
+            db => db.ScriptEvaluateAsync(
+                DeleteIfOwnerScript,
+                new RedisKey[] { GetKey(playSessionId) },
+                new RedisValue[] { ownerPod }),
+            cancellationToken).ConfigureAwait(false);
         return result == 1;
     }
 
@@ -200,18 +204,20 @@ return 1";
         long durablePlaybackOffset,
         CancellationToken cancellationToken = default)
     {
-        var result = (long?)await _db.ScriptEvaluateAsync(
-            UpdateProgressScript,
-            new RedisKey[] { GetKey(playSessionId) },
-            new RedisValue[]
-            {
-                ownerPod,
-                manifestPath,
-                segmentPathPrefix,
-                completedSegmentIndex,
-                durablePlaybackOffset,
-                (long)GetRecoveryRetention().TotalMilliseconds
-            }).ConfigureAwait(false);
+        var result = (long?)await ExecuteAsync(
+            db => db.ScriptEvaluateAsync(
+                UpdateProgressScript,
+                new RedisKey[] { GetKey(playSessionId) },
+                new RedisValue[]
+                {
+                    ownerPod,
+                    manifestPath,
+                    segmentPathPrefix,
+                    completedSegmentIndex,
+                    durablePlaybackOffset,
+                    (long)GetRecoveryRetention().TotalMilliseconds
+                }),
+            cancellationToken).ConfigureAwait(false);
         return result == 1;
     }
 
@@ -222,16 +228,18 @@ return 1";
         var leaseDurationMs = (long)_options.LeaseDurationSeconds * 1000;
         var currentMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        var result = (long?)await _db.ScriptEvaluateAsync(
-            TakeoverScript,
-            keys: new RedisKey[] { key },
-            values: new RedisValue[]
-            {
-                currentMs,
-                claimingPod,
-                leaseDurationMs,
-                (long)GetRecoveryRetention().TotalMilliseconds
-            }).ConfigureAwait(false);
+        var result = (long?)await ExecuteAsync(
+            db => db.ScriptEvaluateAsync(
+                TakeoverScript,
+                keys: new RedisKey[] { key },
+                values: new RedisValue[]
+                {
+                    currentMs,
+                    claimingPod,
+                    leaseDurationMs,
+                    (long)GetRecoveryRetention().TotalMilliseconds
+                }),
+            cancellationToken).ConfigureAwait(false);
 
         var succeeded = result == 1;
         if (succeeded)
@@ -253,52 +261,54 @@ return 1";
     /// <inheritdoc />
     public async Task<IEnumerable<TranscodeSession>> GetActiveSessionsAsync(CancellationToken cancellationToken = default)
     {
-        var sessions = new List<TranscodeSession>();
-        var servers = _redis.GetServers();
-
-        foreach (var server in servers)
+        return await _redis.ExecuteAsync<IEnumerable<TranscodeSession>>(async redis =>
         {
-            if (!server.IsConnected)
+            var sessions = new List<TranscodeSession>();
+            var db = redis.GetDatabase();
+            foreach (var server in redis.GetServers())
             {
-                continue;
-            }
-
-            var keys = new List<RedisKey>();
-            await foreach (var key in server.KeysAsync(database: _db.Database, pattern: KeyPrefix + "*", pageSize: 1000).WithCancellation(cancellationToken).ConfigureAwait(false))
-            {
-                keys.Add(key);
-            }
-
-            var tasks = keys.Select(key => _db.StringGetAsync(key)).ToList();
-            var values = await Task.WhenAll(tasks).ConfigureAwait(false);
-
-            foreach (var raw in values)
-            {
-                if (!raw.HasValue)
+                if (!server.IsConnected)
                 {
                     continue;
                 }
 
-                TranscodeSession? session;
-                try
+                var keys = new List<RedisKey>();
+                await foreach (var key in server.KeysAsync(database: db.Database, pattern: KeyPrefix + "*", pageSize: 1000).WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
-                    session = JsonSerializer.Deserialize<TranscodeSession>(raw.ToString());
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to deserialize transcode session from Redis.");
-                    continue;
+                    keys.Add(key);
                 }
 
-                NormalizeLeaseExpiry(session);
-                if (session is not null && session.LeaseExpiresUtc > DateTime.UtcNow)
+                var tasks = keys.Select(key => db.StringGetAsync(key)).ToList();
+                var values = await Task.WhenAll(tasks).ConfigureAwait(false);
+
+                foreach (var raw in values)
                 {
-                    sessions.Add(session);
+                    if (!raw.HasValue)
+                    {
+                        continue;
+                    }
+
+                    TranscodeSession? session;
+                    try
+                    {
+                        session = JsonSerializer.Deserialize<TranscodeSession>(raw.ToString());
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to deserialize transcode session from Redis.");
+                        continue;
+                    }
+
+                    NormalizeLeaseExpiry(session);
+                    if (session is not null && session.LeaseExpiresUtc > DateTime.UtcNow)
+                    {
+                        sessions.Add(session);
+                    }
                 }
             }
-        }
 
-        return sessions;
+            return sessions;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -308,14 +318,20 @@ return 1";
         var json = JsonSerializer.Serialize(session);
         // Live stream records use the same lease duration as transcode sessions.
         var leaseDurationMs = (long)_options.LeaseDurationSeconds * 1000;
-        await _db.StringSetAsync(key, json, TimeSpan.FromMilliseconds(leaseDurationMs)).ConfigureAwait(false);
-
-        // Also index by play session id so the caller can look up by either key.
-        if (!string.IsNullOrEmpty(session.PlaySessionId))
+        await _redis.ExecuteAsync(async redis =>
         {
-            var playKey = GetLiveStreamKey(session.LiveStreamId, session.PlaySessionId);
-            await _db.StringSetAsync(playKey, json, TimeSpan.FromMilliseconds(leaseDurationMs)).ConfigureAwait(false);
-        }
+            var db = redis.GetDatabase();
+            await db.StringSetAsync(key, json, TimeSpan.FromMilliseconds(leaseDurationMs)).ConfigureAwait(false);
+
+            // Also index by play session id so the caller can look up by either key.
+            if (!string.IsNullOrEmpty(session.PlaySessionId))
+            {
+                var playKey = GetLiveStreamKey(session.LiveStreamId, session.PlaySessionId);
+                await db.StringSetAsync(playKey, json, TimeSpan.FromMilliseconds(leaseDurationMs)).ConfigureAwait(false);
+            }
+
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
 
         _logger.LogDebug(
             "Set live stream session {LiveStreamId}/{SessionId} in Redis.",
@@ -327,7 +343,7 @@ return 1";
     public async Task<LiveStreamSession?> TryGetLiveStreamAsync(string liveStreamId, string sessionIdOrPlaySessionId, CancellationToken cancellationToken = default)
     {
         var key = GetLiveStreamKey(liveStreamId, sessionIdOrPlaySessionId);
-        var raw = await _db.StringGetAsync(key).ConfigureAwait(false);
+        var raw = await ExecuteAsync(db => db.StringGetAsync(key), cancellationToken).ConfigureAwait(false);
         if (!raw.HasValue)
         {
             return null;
@@ -340,7 +356,7 @@ return 1";
     public async Task DeleteLiveStreamAsync(string liveStreamId, string sessionIdOrPlaySessionId, CancellationToken cancellationToken = default)
     {
         var key = GetLiveStreamKey(liveStreamId, sessionIdOrPlaySessionId);
-        var raw = await _db.StringGetAsync(key).ConfigureAwait(false);
+        var raw = await ExecuteAsync(db => db.StringGetAsync(key), cancellationToken).ConfigureAwait(false);
         if (raw.HasValue)
         {
             var session = JsonSerializer.Deserialize<LiveStreamSession>(raw.ToString());
@@ -357,7 +373,7 @@ return 1";
                     keysToDelete.Add(GetLiveStreamKey(liveStreamId, session.PlaySessionId));
                 }
 
-                await _db.KeyDeleteAsync(keysToDelete.ToArray()).ConfigureAwait(false);
+                await ExecuteAsync(db => db.KeyDeleteAsync(keysToDelete.ToArray()), cancellationToken).ConfigureAwait(false);
                 _logger.LogDebug(
                     "Deleted live stream session {LiveStreamId}/{SessionId} from Redis.",
                     liveStreamId.ReplaceLineEndings(string.Empty),
@@ -367,8 +383,13 @@ return 1";
         }
 
         // Fallback: delete just the key that was supplied.
-        await _db.KeyDeleteAsync(key).ConfigureAwait(false);
+        await ExecuteAsync(db => db.KeyDeleteAsync(key), cancellationToken).ConfigureAwait(false);
     }
+
+    private Task<T> ExecuteAsync<T>(
+        Func<IDatabase, Task<T>> operation,
+        CancellationToken cancellationToken)
+        => _redis.ExecuteAsync(redis => operation(redis.GetDatabase()), cancellationToken);
 
     private long GetLeaseDurationMilliseconds()
         => Math.Max(1, _options.LeaseDurationSeconds) * 1000L;
