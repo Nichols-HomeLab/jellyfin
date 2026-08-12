@@ -49,7 +49,7 @@ ENV JELLYFIN_DATA_DIR=/config \
     JELLYFIN_CACHE_DIR=/cache \
     JELLYFIN_LOG_DIR=/config/log
 
-ENTRYPOINT ["./jellyfin", \
-            "--datadir", "/config", \
-            "--cachedir", "/cache", \
-            "--webdir", "/jellyfin/jellyfin-web"]
+# Directory settings are environment-configurable. Do not repeat them as CLI
+# arguments here: command-line values override JELLYFIN_*_DIR and make retained
+# installations with separate config/data paths fail marker validation.
+ENTRYPOINT ["./jellyfin"]
