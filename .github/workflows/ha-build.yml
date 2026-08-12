@@ -89,7 +89,13 @@ jobs:
           # act_runner creates this job inside the runner's sibling DinD
           # daemon. The daemon is listening on the job bridge gateway, not on
           # this container's /var/run/docker.sock.
-          docker_gateway="$(ip route show default | awk '{print $3; exit}')"
+          # The minimal runner image does not include iproute2. Linux exposes
+          # the default gateway in little-endian hex through /proc/net/route.
+          gateway_hex="$(awk '$2 == "00000000" { print $3; exit }' /proc/net/route)"
+          test "${#gateway_hex}" -eq 8
+          printf -v docker_gateway '%d.%d.%d.%d' \
+            "0x${gateway_hex:6:2}" "0x${gateway_hex:4:2}" \
+            "0x${gateway_hex:2:2}" "0x${gateway_hex:0:2}"
           test -n "${docker_gateway}"
           docker_host="tcp://${docker_gateway}:2375"
           DOCKER_HOST="${docker_host}" docker version >/dev/null

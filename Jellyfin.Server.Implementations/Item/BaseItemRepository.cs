@@ -119,24 +119,35 @@ public sealed class BaseItemRepository
 
         var relatedItems = ids.SelectMany(f => TraverseHirachyDown(f, context)).ToArray();
 
-        // Remove any UserData entries for the placeholder item that would conflict with the UserData
-        // being detached from the item being deleted. This is necessary because, during an update,
-        // UserData may be reattached to a new entry, but some entries can be left behind.
-        // Ensures there are no duplicate UserId/CustomDataKey combinations for the placeholder.
-        context.UserData
-            .Join(
-                context.UserData.WhereOneOrMany(relatedItems, e => e.ItemId),
-                placeholder => new { placeholder.UserId, placeholder.CustomDataKey },
-                userData => new { userData.UserId, userData.CustomDataKey },
-                (placeholder, userData) => placeholder)
-            .Where(e => e.ItemId == PlaceholderId)
-            .ExecuteDelete();
+        // Several item versions can carry the same logical watch-state key. Updating all of them to
+        // the single placeholder id would violate UserData's composite primary key. Consolidate each
+        // logical key before detaching it, including any state already attached to the placeholder.
+        var userDataToDetach = context.UserData
+            .AsNoTracking()
+            .WhereOneOrMany(relatedItems, e => e.ItemId)
+            .ToArray();
+        if (userDataToDetach.Length > 0)
+        {
+            var affectedUsers = userDataToDetach.Select(e => e.UserId).Distinct().ToArray();
+            var affectedKeys = userDataToDetach
+                .Select(e => new { e.UserId, e.CustomDataKey })
+                .ToHashSet();
+            var existingPlaceholderData = context.UserData
+                .Where(e => e.ItemId == PlaceholderId && affectedUsers.Contains(e.UserId))
+                .AsEnumerable()
+                .Where(e => affectedKeys.Contains(new { e.UserId, e.CustomDataKey }))
+                .ToArray();
 
-        // Detach all user watch data
-        context.UserData.WhereOneOrMany(relatedItems, e => e.ItemId)
-            .ExecuteUpdate(e => e
-                .SetProperty(f => f.RetentionDate, date)
-                .SetProperty(f => f.ItemId, PlaceholderId));
+            context.UserData.WhereOneOrMany(relatedItems, e => e.ItemId).ExecuteDelete();
+            context.UserData.RemoveRange(existingPlaceholderData);
+            context.SaveChanges();
+
+            var mergedUserData = userDataToDetach
+                .Concat(existingPlaceholderData)
+                .GroupBy(e => new { e.UserId, e.CustomDataKey })
+                .Select(group => MergeUserData(group, PlaceholderId, date));
+            context.UserData.AddRange(mergedUserData);
+        }
 
         context.AncestorIds.WhereOneOrMany(relatedItems, e => e.ItemId).ExecuteDelete();
         context.AncestorIds.WhereOneOrMany(relatedItems, e => e.ParentItemId).ExecuteDelete();
@@ -160,6 +171,39 @@ public sealed class BaseItemRepository
         context.TrickplayInfos.WhereOneOrMany(relatedItems, e => e.ItemId).ExecuteDelete();
         context.SaveChanges();
         transaction.Commit();
+    }
+
+    internal static UserData MergeUserData(IEnumerable<UserData> entries, Guid targetItemId, DateTime? retentionDate)
+    {
+        var records = entries.ToArray();
+        if (records.Length == 0)
+        {
+            throw new ArgumentException("At least one UserData entry is required.", nameof(entries));
+        }
+
+        var mostRecent = records
+            .OrderByDescending(e => e.LastPlayedDate)
+            .ThenByDescending(e => e.PlayCount)
+            .First();
+
+        return new UserData
+        {
+            ItemId = targetItemId,
+            Item = null,
+            UserId = mostRecent.UserId,
+            User = null,
+            CustomDataKey = mostRecent.CustomDataKey,
+            Rating = records.Where(e => e.Rating.HasValue).OrderByDescending(e => e.LastPlayedDate).Select(e => e.Rating).FirstOrDefault(),
+            PlaybackPositionTicks = mostRecent.PlaybackPositionTicks,
+            PlayCount = records.Max(e => e.PlayCount),
+            IsFavorite = records.Any(e => e.IsFavorite),
+            LastPlayedDate = records.Max(e => e.LastPlayedDate),
+            Played = records.Any(e => e.Played),
+            AudioStreamIndex = mostRecent.AudioStreamIndex,
+            SubtitleStreamIndex = mostRecent.SubtitleStreamIndex,
+            Likes = records.Where(e => e.Likes.HasValue).OrderByDescending(e => e.LastPlayedDate).Select(e => e.Likes).FirstOrDefault(),
+            RetentionDate = retentionDate
+        };
     }
 
     /// <inheritdoc />
@@ -429,6 +473,29 @@ public sealed class BaseItemRepository
         return query.GroupBy(keySelector).Select(group => group.Min(item => item.Id));
     }
 
+    /// <summary>
+    /// Selects one representative for each complete grouping key while preserving every item whose
+    /// key is incomplete. An incomplete key cannot establish that two database rows represent the
+    /// same media item and therefore must not be used for deduplication.
+    /// </summary>
+    /// <typeparam name="TKey">The grouping-key type.</typeparam>
+    /// <param name="query">The filtered BaseItems query.</param>
+    /// <param name="hasCompleteKey">A predicate identifying rows with a complete grouping key.</param>
+    /// <param name="keySelector">The grouping key.</param>
+    /// <returns>Representative identifiers plus every identifier with an incomplete key.</returns>
+    internal static IQueryable<Guid> SelectRepresentativeIdsPreservingIncompleteKeys<TKey>(
+        IQueryable<BaseItemEntity> query,
+        Expression<Func<BaseItemEntity, bool>> hasCompleteKey,
+        Expression<Func<BaseItemEntity, TKey>> keySelector)
+    {
+        var hasIncompleteKey = Expression.Lambda<Func<BaseItemEntity, bool>>(
+            Expression.Not(hasCompleteKey.Body),
+            hasCompleteKey.Parameters);
+
+        return SelectRepresentativeIds(query.Where(hasCompleteKey), keySelector)
+            .Concat(query.Where(hasIncompleteKey).Select(item => item.Id));
+    }
+
     private static bool UsePostgreSqlQueryOptimizations(JellyfinDbContext context)
     {
         return string.Equals(
@@ -448,21 +515,31 @@ public sealed class BaseItemRepository
         if (enableGroupByPresentationUniqueKey && filter.GroupBySeriesPresentationUniqueKey)
         {
             var tempQuery = UsePostgreSqlQueryOptimizations(context)
-                ? SelectRepresentativeIds(dbQuery, e => new { e.PresentationUniqueKey, e.SeriesPresentationUniqueKey })
+                ? SelectRepresentativeIdsPreservingIncompleteKeys(
+                    dbQuery,
+                    e => e.PresentationUniqueKey != null && e.PresentationUniqueKey != string.Empty
+                        && e.SeriesPresentationUniqueKey != null && e.SeriesPresentationUniqueKey != string.Empty,
+                    e => new { e.PresentationUniqueKey, e.SeriesPresentationUniqueKey })
                 : dbQuery.GroupBy(e => new { e.PresentationUniqueKey, e.SeriesPresentationUniqueKey }).Select(e => e.FirstOrDefault()).Select(e => e!.Id);
             dbQuery = context.BaseItems.Where(e => tempQuery.Contains(e.Id));
         }
         else if (enableGroupByPresentationUniqueKey)
         {
             var tempQuery = UsePostgreSqlQueryOptimizations(context)
-                ? SelectRepresentativeIds(dbQuery, e => e.PresentationUniqueKey)
+                ? SelectRepresentativeIdsPreservingIncompleteKeys(
+                    dbQuery,
+                    e => e.PresentationUniqueKey != null && e.PresentationUniqueKey != string.Empty,
+                    e => e.PresentationUniqueKey)
                 : dbQuery.GroupBy(e => e.PresentationUniqueKey).Select(e => e.FirstOrDefault()).Select(e => e!.Id);
             dbQuery = context.BaseItems.Where(e => tempQuery.Contains(e.Id));
         }
         else if (filter.GroupBySeriesPresentationUniqueKey)
         {
             var tempQuery = UsePostgreSqlQueryOptimizations(context)
-                ? SelectRepresentativeIds(dbQuery, e => e.SeriesPresentationUniqueKey)
+                ? SelectRepresentativeIdsPreservingIncompleteKeys(
+                    dbQuery,
+                    e => e.SeriesPresentationUniqueKey != null && e.SeriesPresentationUniqueKey != string.Empty,
+                    e => e.SeriesPresentationUniqueKey)
                 : dbQuery.GroupBy(e => e.SeriesPresentationUniqueKey).Select(e => e.FirstOrDefault()).Select(e => e!.Id);
             dbQuery = context.BaseItems.Where(e => tempQuery.Contains(e.Id));
         }
@@ -833,14 +910,41 @@ public sealed class BaseItemRepository
                 var userKeys = item.GetUserDataKeys().ToArray();
                 var retentionDate = (DateTime?)null;
 
-                await dbContext.UserData
+                var placeholderData = await dbContext.UserData
+                    .AsNoTracking()
                     .Where(e => e.ItemId == PlaceholderId)
                     .Where(e => userKeys.Contains(e.CustomDataKey))
-                    .ExecuteUpdateAsync(
-                        e => e
-                            .SetProperty(f => f.ItemId, item.Id)
-                            .SetProperty(f => f.RetentionDate, retentionDate),
-                        cancellationToken).ConfigureAwait(false);
+                    .ToArrayAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                if (placeholderData.Length > 0)
+                {
+                    var affectedUsers = placeholderData.Select(e => e.UserId).Distinct().ToArray();
+                    var affectedKeys = placeholderData
+                        .Select(e => new { e.UserId, e.CustomDataKey })
+                        .ToHashSet();
+                    var conflictingItemData = await dbContext.UserData
+                        .Where(e => e.ItemId == item.Id && affectedUsers.Contains(e.UserId))
+                        .ToArrayAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    conflictingItemData = conflictingItemData
+                        .Where(e => affectedKeys.Contains(new { e.UserId, e.CustomDataKey }))
+                        .ToArray();
+
+                    await dbContext.UserData
+                        .Where(e => e.ItemId == PlaceholderId)
+                        .Where(e => userKeys.Contains(e.CustomDataKey))
+                        .ExecuteDeleteAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    dbContext.UserData.RemoveRange(conflictingItemData);
+                    await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+                    var mergedUserData = placeholderData
+                        .Concat(conflictingItemData)
+                        .GroupBy(e => new { e.UserId, e.CustomDataKey })
+                        .Select(group => MergeUserData(group, item.Id, retentionDate));
+                    dbContext.UserData.AddRange(mergedUserData);
+                    await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                }
 
                 // Rehydrate the cached userdata
                 item.UserData = await dbContext.UserData
