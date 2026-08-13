@@ -505,7 +505,7 @@ namespace Emby.Server.Implementations
 
             serviceCollection.AddSingleton<IBlurayExaminer, BdInfoExaminer>();
 
-            serviceCollection.AddSingleton<IUserDataCacheInvalidator, NullUserDataCacheInvalidator>();
+            serviceCollection.AddUserDataCacheInvalidatorFallback();
             serviceCollection.AddSingleton<IUserDataManager, UserDataManager>();
 
             serviceCollection.AddSingleton<IItemRepository, BaseItemRepository>();
