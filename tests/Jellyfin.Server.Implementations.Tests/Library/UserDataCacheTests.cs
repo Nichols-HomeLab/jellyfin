@@ -3,12 +3,26 @@ using System.Collections.Generic;
 using Emby.Server.Implementations.Library;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace Jellyfin.Server.Implementations.Tests.Library;
 
 public sealed class UserDataCacheTests
 {
+    [Fact]
+    public void FallbackRegistrationDoesNotReplaceHaInvalidator()
+    {
+        var services = new ServiceCollection();
+        var invalidator = new FakeInvalidator(new FakeInvalidationHub());
+        services.AddSingleton<IUserDataCacheInvalidator>(invalidator);
+
+        services.AddUserDataCacheInvalidatorFallback();
+
+        using var provider = services.BuildServiceProvider();
+        Assert.Same(invalidator, provider.GetRequiredService<IUserDataCacheInvalidator>());
+    }
+
     [Fact]
     public void PublishInvalidationEvictsOnlyRemoteReplicaCache()
     {
