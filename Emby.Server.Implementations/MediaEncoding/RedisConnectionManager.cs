@@ -34,6 +34,11 @@ public sealed class RedisConnectionManager : IDisposable
     }
 
     /// <summary>
+    /// Occurs after the managed connection has been replaced.
+    /// </summary>
+    public event Action<IConnectionMultiplexer>? ConnectionReplaced;
+
+    /// <summary>
     /// Executes an operation and retries it once on a new connection when the
     /// current connection reports that its server is no longer writable.
     /// </summary>
@@ -110,6 +115,7 @@ public sealed class RedisConnectionManager : IDisposable
             var replacement = _connectionFactory();
             var previous = Interlocked.Exchange(ref _connection, replacement);
             previous.Dispose();
+            ConnectionReplaced?.Invoke(replacement);
             _logger.LogInformation("Reconnected the Redis transcode store to a fresh writable endpoint.");
         }
         finally

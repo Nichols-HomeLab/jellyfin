@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
-using BitFaster.Caching.Lru;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Configuration;
@@ -23,24 +22,26 @@ namespace Emby.Server.Implementations.Library
     /// <summary>
     /// Class UserDataManager.
     /// </summary>
-    public class UserDataManager : IUserDataManager
+    public sealed class UserDataManager : IUserDataManager, IDisposable
     {
         private readonly IServerConfigurationManager _config;
         private readonly IDbContextFactory<JellyfinDbContext> _repository;
-        private readonly FastConcurrentLru<string, UserItemData> _cache;
+        private readonly UserDataCache _cache;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="UserDataManager"/> class.
         /// </summary>
         /// <param name="config">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
         /// <param name="repository">Instance of the <see cref="IDbContextFactory{JellyfinDbContext}"/> interface.</param>
+        /// <param name="cacheInvalidator">Distributes cache invalidations between server instances.</param>
         public UserDataManager(
             IServerConfigurationManager config,
-            IDbContextFactory<JellyfinDbContext> repository)
+            IDbContextFactory<JellyfinDbContext> repository,
+            IUserDataCacheInvalidator cacheInvalidator)
         {
             _config = config;
             _repository = repository;
-            _cache = new FastConcurrentLru<string, UserItemData>(Environment.ProcessorCount, _config.Configuration.CacheSize, StringComparer.OrdinalIgnoreCase);
+            _cache = new UserDataCache(_config.Configuration.CacheSize, cacheInvalidator);
         }
 
         /// <inheritdoc />
@@ -81,6 +82,7 @@ namespace Emby.Server.Implementations.Library
             var cacheKey = GetCacheKey(userId, item.Id);
             _cache.AddOrUpdate(cacheKey, userData);
             item.UserData = dbContext.UserData.Where(e => e.ItemId == item.Id).AsNoTracking().ToArray(); // rehydrate the cached userdata
+            _cache.PublishInvalidation(cacheKey);
 
             UserDataSaved?.Invoke(this, new UserDataSaveEventArgs
             {
@@ -90,6 +92,13 @@ namespace Emby.Server.Implementations.Library
                 UserId = user.Id,
                 Item = item
             });
+        }
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            _cache.Dispose();
+            GC.SuppressFinalize(this);
         }
 
         /// <inheritdoc />

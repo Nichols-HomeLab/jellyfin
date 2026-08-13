@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Emby.Server.Implementations;
+using Emby.Server.Implementations.Library;
 using Emby.Server.Implementations.MediaEncoding;
 using Emby.Server.Implementations.Session;
 using Jellyfin.Api.WebSocketListeners;
@@ -137,6 +138,7 @@ namespace Jellyfin.Server
                     }
                 });
                 serviceCollection.AddSingleton<ITranscodeSessionStore, RedisTranscodeSessionStore>();
+                serviceCollection.AddSingleton<IUserDataCacheInvalidator, RedisUserDataCacheInvalidator>();
             }
             else
             {
