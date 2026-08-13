@@ -30,6 +30,9 @@ namespace MediaBrowser.Controller.Entities.Movies
         protected override bool FilterLinkedChildrenPerUser => true;
 
         [JsonIgnore]
+        public override bool SupportsUserDataFromChildren => false;
+
+        [JsonIgnore]
         public override bool SupportsInheritedParentImages => false;
 
         [JsonIgnore]
