@@ -247,14 +247,10 @@ namespace Emby.Server.Implementations.Library
         /// <inheritdoc />
         public UserItemData GetUserData(User user, BaseItem item)
         {
-            var cacheKey = GetCacheKey(user.InternalId, item.Id);
-            return _cache.GetOrAdd(
-                cacheKey,
-                (k, i) => i.UserData?.Where(e => e.UserId.Equals(user.Id)).Select(Map).FirstOrDefault() ?? new UserItemData()
-                {
-                    Key = i.GetUserDataKeys()[0],
-                },
-                item);
+            return GetUserData(user, item.Id, item.GetUserDataKeys()) ?? new UserItemData
+            {
+                Key = item.GetUserDataKeys()[0],
+            };
         }
 
         /// <inheritdoc />
