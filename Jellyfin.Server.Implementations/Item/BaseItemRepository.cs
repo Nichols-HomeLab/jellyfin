@@ -408,13 +408,22 @@ public sealed class BaseItemRepository
             latestGroupKeys = latestGroupKeys.Take(limit);
         }
 
+        // Execute the small key query before composing the item query. Keeping
+        // it as a nested IQueryable triggers an EF Core nullability-processor
+        // failure with Npgsql for grouped TV-library latest-item requests.
+        var latestGroupKeyValues = latestGroupKeys.ToArray();
+        if (latestGroupKeyValues.Length == 0)
+        {
+            return Array.Empty<BaseItem>();
+        }
+
         filter.Limit = null;
 
         var mainquery = PrepareItemQuery(context, filter);
         mainquery = TranslateQuery(mainquery, context, filter);
         mainquery = collectionType == CollectionType.tvshows
-            ? mainquery.Where(item => latestGroupKeys.Contains(item.SeriesName!))
-            : mainquery.Where(item => latestGroupKeys.Contains(item.Album!));
+            ? mainquery.Where(item => latestGroupKeyValues.Contains(item.SeriesName!))
+            : mainquery.Where(item => latestGroupKeyValues.Contains(item.Album!));
         mainquery = ApplyGroupingFilter(context, mainquery, filter);
         mainquery = ApplyQueryPaging(mainquery, filter);
 
