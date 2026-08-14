@@ -540,6 +540,14 @@ namespace Emby.Server.Implementations
 
             serviceCollection.AddSingleton<ITVSeriesManager, TVSeriesManager>();
 
+            serviceCollection.AddSingleton<IPlaybackPathResolver>(_ =>
+            {
+                var canonicalRoot = Environment.GetEnvironmentVariable("JELLYFIN_HOT_CACHE_CANONICAL_ROOT");
+                var hotRoot = Environment.GetEnvironmentVariable("JELLYFIN_HOT_CACHE_ROOT");
+                return string.IsNullOrWhiteSpace(canonicalRoot) || string.IsNullOrWhiteSpace(hotRoot)
+                    ? new CanonicalPlaybackPathResolver()
+                    : new PrototypePlaybackPathResolver(canonicalRoot, hotRoot);
+            });
             serviceCollection.AddSingleton<IMediaSourceManager, MediaSourceManager>();
 
             serviceCollection.AddSingleton<ISubtitleManager, SubtitleManager>();
