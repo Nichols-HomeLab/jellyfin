@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using Emby.Server.Implementations.Library;
 using MediaBrowser.Controller.Library;
@@ -57,6 +58,92 @@ public sealed class PrototypePlaybackPathResolverTests
     }
 
     [Fact]
+    public void Resolve_MissingHotFile_ReturnsCanonicalPath()
+    {
+        var testRoot = Directory.CreateTempSubdirectory("jellyfin-hot-cache-");
+
+        try
+        {
+            var canonicalRoot = Directory.CreateDirectory(Path.Combine(testRoot.FullName, "media"));
+            var hotRoot = Directory.CreateDirectory(Path.Combine(testRoot.FullName, "hot"));
+            var canonicalPath = Path.Combine(canonicalRoot.FullName, "episode.mkv");
+            File.WriteAllText(canonicalPath, "cold-media");
+            var resolver = new PrototypePlaybackPathResolver(canonicalRoot.FullName, hotRoot.FullName);
+
+            var result = resolver.Resolve(new PlaybackPathRequest(
+                canonicalPath,
+                new FileInfo(canonicalPath).Length,
+                PlaybackPathPurpose.MainMedia));
+
+            Assert.False(result.IsHot);
+            Assert.Equal(canonicalPath, result.Path);
+            Assert.Equal("prototype-miss", result.Reason);
+        }
+        finally
+        {
+            testRoot.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Resolve_StaleHotFileLength_ReturnsCanonicalPath()
+    {
+        var testRoot = Directory.CreateTempSubdirectory("jellyfin-hot-cache-");
+
+        try
+        {
+            var canonicalRoot = Directory.CreateDirectory(Path.Combine(testRoot.FullName, "media"));
+            var hotRoot = Directory.CreateDirectory(Path.Combine(testRoot.FullName, "hot"));
+            var canonicalPath = Path.Combine(canonicalRoot.FullName, "episode.mkv");
+            var hotPath = Path.Combine(hotRoot.FullName, "episode.mkv");
+            File.WriteAllText(canonicalPath, "cold-media");
+            File.WriteAllText(hotPath, "stale");
+            var resolver = new PrototypePlaybackPathResolver(canonicalRoot.FullName, hotRoot.FullName);
+
+            var result = resolver.Resolve(new PlaybackPathRequest(
+                canonicalPath,
+                new FileInfo(canonicalPath).Length,
+                PlaybackPathPurpose.MainMedia));
+
+            Assert.False(result.IsHot);
+            Assert.Equal(canonicalPath, result.Path);
+            Assert.Equal("prototype-length-mismatch", result.Reason);
+        }
+        finally
+        {
+            testRoot.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Resolve_CanonicalPathOutsideConfiguredRoot_ReturnsCanonicalPath()
+    {
+        var testRoot = Directory.CreateTempSubdirectory("jellyfin-hot-cache-");
+
+        try
+        {
+            var canonicalRoot = Directory.CreateDirectory(Path.Combine(testRoot.FullName, "media"));
+            var hotRoot = Directory.CreateDirectory(Path.Combine(testRoot.FullName, "hot"));
+            var outsidePath = Path.Combine(testRoot.FullName, "outside.mkv");
+            File.WriteAllText(outsidePath, "cold-media");
+            var resolver = new PrototypePlaybackPathResolver(canonicalRoot.FullName, hotRoot.FullName);
+
+            var result = resolver.Resolve(new PlaybackPathRequest(
+                outsidePath,
+                new FileInfo(outsidePath).Length,
+                PlaybackPathPurpose.MainMedia));
+
+            Assert.False(result.IsHot);
+            Assert.Equal(outsidePath, result.Path);
+            Assert.Equal("outside-canonical-root", result.Reason);
+        }
+        finally
+        {
+            testRoot.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public void Resolve_HotSymlinkEscapesRoot_ReturnsCanonicalPath()
     {
         var testRoot = Directory.CreateTempSubdirectory("jellyfin-hot-cache-");
@@ -88,6 +175,51 @@ public sealed class PrototypePlaybackPathResolverTests
         }
         finally
         {
+            testRoot.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Resolve_UnreadableHotFile_ReturnsCanonicalPath()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var testRoot = Directory.CreateTempSubdirectory("jellyfin-hot-cache-");
+        string? hotPath = null;
+
+        try
+        {
+            var canonicalRoot = Directory.CreateDirectory(Path.Combine(testRoot.FullName, "media"));
+            var hotRoot = Directory.CreateDirectory(Path.Combine(testRoot.FullName, "hot"));
+            var relativePath = Path.Combine("tv", "Example", "episode.mkv");
+            var canonicalPath = Path.Combine(canonicalRoot.FullName, relativePath);
+            hotPath = Path.Combine(hotRoot.FullName, relativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(canonicalPath)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(hotPath)!);
+            File.WriteAllText(canonicalPath, "cold-media");
+            File.WriteAllText(hotPath, "hot--media");
+            File.SetUnixFileMode(hotPath, UnixFileMode.None);
+            var resolver = new PrototypePlaybackPathResolver(canonicalRoot.FullName, hotRoot.FullName);
+
+            var result = resolver.Resolve(new PlaybackPathRequest(
+                canonicalPath,
+                new FileInfo(canonicalPath).Length,
+                PlaybackPathPurpose.MainMedia));
+
+            Assert.False(result.IsHot);
+            Assert.Equal(canonicalPath, result.Path);
+            Assert.Equal("prototype-unreadable", result.Reason);
+        }
+        finally
+        {
+            if (hotPath is not null && File.Exists(hotPath))
+            {
+                File.SetUnixFileMode(hotPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+
             testRoot.Delete(recursive: true);
         }
     }

@@ -53,6 +53,29 @@ public sealed class PrototypePlaybackPathResolver : IPlaybackPathResolver
             return new PlaybackPathResolution(request.CanonicalPath, false, "prototype-length-mismatch");
         }
 
+        try
+        {
+            using var stream = new FileStream(
+                resolvedHotPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete,
+                bufferSize: 1,
+                FileOptions.SequentialScan);
+            if (stream.Length > 0 && stream.ReadByte() < 0)
+            {
+                return new PlaybackPathResolution(request.CanonicalPath, false, "prototype-unreadable");
+            }
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return new PlaybackPathResolution(request.CanonicalPath, false, "prototype-unreadable");
+        }
+        catch (IOException)
+        {
+            return new PlaybackPathResolution(request.CanonicalPath, false, "prototype-unreadable");
+        }
+
         return new PlaybackPathResolution(hotPath, true, "prototype-hit");
     }
 }
