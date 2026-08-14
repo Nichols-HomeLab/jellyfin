@@ -30,8 +30,7 @@ public sealed class PostgreSqlConcurrencyTests : IAsyncLifetime
     /// </summary>
     public PostgreSqlConcurrencyTests()
     {
-        _container = new PostgreSqlBuilder()
-            .WithImage("postgres:16-alpine")
+        _container = new PostgreSqlBuilder("postgres:16-alpine")
             .WithWaitStrategy(Wait.ForUnixContainer().UntilCommandIsCompleted("pg_isready"))
             .Build();
     }

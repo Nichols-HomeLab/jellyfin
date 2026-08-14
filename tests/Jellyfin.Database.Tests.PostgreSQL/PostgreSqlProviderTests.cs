@@ -31,8 +31,7 @@ public sealed class PostgreSqlProviderTests : IAsyncLifetime
     /// </summary>
     public PostgreSqlProviderTests()
     {
-        _container = new PostgreSqlBuilder()
-            .WithImage("postgres:16-alpine")
+        _container = new PostgreSqlBuilder("postgres:16-alpine")
             .WithWaitStrategy(Wait.ForUnixContainer().UntilCommandIsCompleted("pg_isready"))
             .Build();
     }

@@ -1,6 +1,27 @@
 namespace MediaBrowser.Controller.Library;
 
 /// <summary>
+/// Identifies how Jellyfin will use a resolved path.
+/// </summary>
+public enum PlaybackPathPurpose
+{
+    /// <summary>
+    /// The main media file used for direct play or transcoding.
+    /// </summary>
+    MainMedia,
+
+    /// <summary>
+    /// An external subtitle, audio, or other sidecar stream.
+    /// </summary>
+    ExternalStream,
+
+    /// <summary>
+    /// A media file opened by FFprobe.
+    /// </summary>
+    Probe
+}
+
+/// <summary>
 /// Resolves a canonical media path to the local path used for one read.
 /// </summary>
 public interface IPlaybackPathResolver
@@ -34,24 +55,3 @@ public readonly record struct PlaybackPathResolution(
     string Path,
     bool IsHot,
     string Reason);
-
-/// <summary>
-/// Identifies how Jellyfin will use a resolved path.
-/// </summary>
-public enum PlaybackPathPurpose
-{
-    /// <summary>
-    /// The main media file used for direct play or transcoding.
-    /// </summary>
-    MainMedia,
-
-    /// <summary>
-    /// An external subtitle, audio, or other sidecar stream.
-    /// </summary>
-    ExternalStream,
-
-    /// <summary>
-    /// A media file opened by FFprobe.
-    /// </summary>
-    Probe
-}
