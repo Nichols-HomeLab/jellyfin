@@ -90,7 +90,7 @@
     <PackageVersion Include="TagLibSharp" Version="2.3.0" />
     <PackageVersion Include="z440.atl.core" Version="7.16.0" />
     <PackageVersion Include="TMDbLib" Version="3.0.0" />
-    <PackageVersion Include="UTF.Unknown" Version="2.6.0" />
+    <PackageVersion Include="UTF.Unknown" Version="2.7.0" />
     <PackageVersion Include="Xunit.Priority" Version="1.1.6" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
     <PackageVersion Include="Xunit.SkippableFact" Version="1.5.85" />
