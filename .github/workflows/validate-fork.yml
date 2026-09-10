@@ -1,0 +1,21 @@
+name: Validate PostgreSQL companion server
+
+on:
+  push:
+    branches: [main, 'fix/startup-failure-exit-code-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server-regressions:
+    runs-on: [self-hosted, k3s, linux, amd64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: '10.0.x'
+      - name: Run server regression tests
+        run: dotnet test tests/Jellyfin.Server.Tests/Jellyfin.Server.Tests.csproj --configuration Release --verbosity minimal --filter "FullyQualifiedName~ProgramTests|FullyQualifiedName~Migrations|FullyQualifiedName~StartupLoggerTests"
