@@ -52,9 +52,7 @@ namespace MediaBrowser.Controller.Entities.TV
 
         /// <inheritdoc />
         [JsonIgnore]
-        public IReadOnlyList<BaseItem> LocalTrailers => GetExtras()
-            .Where(extra => extra.ExtraType == Model.Entities.ExtraType.Trailer)
-            .ToArray();
+        public IReadOnlyList<BaseItem> LocalTrailers => GetExtras([Model.Entities.ExtraType.Trailer]).ToArray();
 
         /// <summary>
         /// Gets or sets the display order.
@@ -84,9 +82,15 @@ namespace MediaBrowser.Controller.Entities.TV
             {
                 var userdatakeys = GetUserDataKeys();
 
-                if (userdatakeys.Count > 1)
+                // The first user data key is a stable cross-folder identity.
+                // When none exists, fall back to the (normalized) series name.
+                var groupingKey = userdatakeys.Count > 1
+                    ? userdatakeys[0]
+                    : GetNameBasedGroupingKey();
+
+                if (!string.IsNullOrEmpty(groupingKey))
                 {
-                    return AddLibrariesToPresentationUniqueKey(userdatakeys[0]);
+                    return AddLibrariesToPresentationUniqueKey(groupingKey);
                 }
             }
 
@@ -103,6 +107,7 @@ namespace MediaBrowser.Controller.Entities.TV
 
             var folders = LibraryManager.GetCollectionFolders(this)
                 .Select(i => i.Id.ToString("N", CultureInfo.InvariantCulture))
+                .Order(StringComparer.Ordinal)
                 .ToArray();
 
             if (folders.Length == 0)
@@ -111,6 +116,14 @@ namespace MediaBrowser.Controller.Entities.TV
             }
 
             return key + "-" + string.Join('-', folders);
+        }
+
+        private string GetNameBasedGroupingKey()
+        {
+            // Prefix with the type so a series can never collide with a same-named item of another kind.
+            return string.IsNullOrEmpty(Name)
+                ? null
+                : "series-" + Name.ToLowerInvariant();
         }
 
         private static string GetUniqueSeriesKey(BaseItem series)
@@ -122,20 +135,19 @@ namespace MediaBrowser.Controller.Entities.TV
         {
             var seriesKey = GetUniqueSeriesKey(this);
 
-            var result = LibraryManager.GetCount(new InternalItemsQuery(user)
+            var result = LibraryManager.GetItemIds(new InternalItemsQuery(user)
             {
                 AncestorWithPresentationUniqueKey = null,
                 SeriesPresentationUniqueKey = seriesKey,
                 IncludeItemTypes = new[] { BaseItemKind.Season },
                 IsVirtualItem = false,
-                Limit = 0,
                 DtoOptions = new DtoOptions(false)
                 {
                     EnableImages = false
                 }
             });
 
-            return result;
+            return result.Count;
         }
 
         public override int GetRecursiveChildCount(User user)
@@ -188,6 +200,25 @@ namespace MediaBrowser.Controller.Entities.TV
             }
 
             return list;
+        }
+
+        /// <inheritdoc />
+        protected override Guid[] GetExtraOwnerIds()
+        {
+            if (!LibraryManager.GetLibraryOptions(this).EnableAutomaticSeriesGrouping)
+            {
+                return base.GetExtraOwnerIds();
+            }
+
+            // Setting PresentationUniqueKey on the query disables presentation-key grouping, so this
+            // returns every folder-item of the merged series rather than the collapsed survivor.
+            var ids = LibraryManager.GetItemIds(new InternalItemsQuery
+            {
+                PresentationUniqueKey = GetPresentationUniqueKey(),
+                IncludeItemTypes = [BaseItemKind.Series]
+            });
+
+            return ids.Count == 0 ? base.GetExtraOwnerIds() : ids.ToArray();
         }
 
         public override IReadOnlyList<BaseItem> GetChildren(User user, bool includeLinkedChildren, InternalItemsQuery query)
@@ -451,7 +482,7 @@ namespace MediaBrowser.Controller.Entities.TV
 
                 if (!currentSeasonNumber.HasValue && !seasonNumber.HasValue && parentSeason.LocationType == LocationType.Virtual)
                 {
-                    return true;
+                    return episodeItem.Season is null or { LocationType: LocationType.Virtual };
                 }
 
                 var season = episodeItem.Season;
@@ -509,7 +540,7 @@ namespace MediaBrowser.Controller.Entities.TV
         {
             var hasChanges = base.BeforeMetadataRefresh(replaceAllMetadata);
 
-            if (!ProductionYear.HasValue)
+            if (ProductionYear is null)
             {
                 var info = LibraryManager.ParseName(Name);
 

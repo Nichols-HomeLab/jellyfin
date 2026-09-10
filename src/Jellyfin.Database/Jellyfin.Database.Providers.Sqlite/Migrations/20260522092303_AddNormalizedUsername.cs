@@ -1,4 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
@@ -10,7 +10,6 @@ namespace Jellyfin.Server.Implementations.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            // this is the first part of the migration. Add the column.
             migrationBuilder.AddColumn<string>(
                 name: "NormalizedUsername",
                 table: "Users",
@@ -23,9 +22,11 @@ namespace Jellyfin.Server.Implementations.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropColumn(
-                name: "NormalizedUsername",
-                table: "Users");
+            migrationBuilder.Sql("ALTER TABLE Users DROP COLUMN NormalizedUsername;");
+
+            migrationBuilder.Sql(
+                @"DELETE FROM __EFMigrationsHistory
+                  WHERE MigrationId = '20260522092304_UpdateNormalizedUsername'");
         }
     }
 }

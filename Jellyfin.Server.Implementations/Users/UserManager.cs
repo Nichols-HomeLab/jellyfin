@@ -147,8 +147,7 @@ namespace Jellyfin.Server.Implementations.Users
         public User? GetFirstUser()
         {
             using var dbContext = _dbProvider.CreateDbContext();
-            return UserQuery(dbContext)
-                .FirstOrDefault();
+            return UserQuery(dbContext).FirstOrDefault();
         }
 
         /// <inheritdoc/>
@@ -171,7 +170,7 @@ namespace Jellyfin.Server.Implementations.Users
         {
             ThrowIfInvalidUsername(newName);
 
-            if (oldName.Equals(newName, StringComparison.OrdinalIgnoreCase))
+            if (oldName.Equals(newName, StringComparison.Ordinal))
             {
                 throw new ArgumentException("The new and old names must be different.");
             }
@@ -199,7 +198,6 @@ namespace Jellyfin.Server.Implementations.Users
                         .FirstOrDefaultAsync(u => u.Id == userId)
                         .ConfigureAwait(false)
                         ?? throw new ResourceNotFoundException(nameof(userId));
-
                     user.Username = newName;
                     user.NormalizedUsername = newName.ToUpperInvariant();
                     await UpdateUserInternalAsync(dbContext, user).ConfigureAwait(false);
@@ -227,17 +225,8 @@ namespace Jellyfin.Server.Implementations.Users
                         ?? throw new ResourceNotFoundException(nameof(user.Id));
 
                     dbContext.Entry(dbUser).CurrentValues.SetValues(user);
-                    dbUser.Permissions.Clear();
-                    foreach (var permission in user.Permissions)
-                    {
-                        dbUser.Permissions.Add(new Permission(permission.Kind, permission.Value));
-                    }
-
-                    dbUser.Preferences.Clear();
-                    foreach (var preference in user.Preferences)
-                    {
-                        dbUser.Preferences.Add(new Preference(preference.Kind, preference.Value));
-                    }
+                    SyncPermissions(dbUser, user.Permissions);
+                    SyncPreferences(dbUser, user.Preferences);
 
                     dbUser.AccessSchedules.Clear();
                     foreach (var accessSchedule in user.AccessSchedules)
@@ -268,6 +257,60 @@ namespace Jellyfin.Server.Implementations.Users
 
                     await dbContext.SaveChangesAsync().ConfigureAwait(false);
                 }
+            }
+        }
+
+        private static void SyncPermissions(User dbUser, ICollection<Permission> source)
+        {
+            var incoming = new Dictionary<PermissionKind, bool>();
+            foreach (var permission in source)
+            {
+                incoming[permission.Kind] = permission.Value;
+            }
+
+            foreach (var existing in dbUser.Permissions)
+            {
+                if (incoming.Remove(existing.Kind, out var value))
+                {
+                    // EF only marks the row modified if the value actually differs, so an update that
+                    // touches nothing but the user row - a session activity stamp - writes no children.
+                    existing.Value = value;
+                }
+                else
+                {
+                    dbUser.Permissions.Remove(existing);
+                }
+            }
+
+            foreach (var (kind, value) in incoming)
+            {
+                dbUser.Permissions.Add(new Permission(kind, value));
+            }
+        }
+
+        private static void SyncPreferences(User dbUser, ICollection<Preference> source)
+        {
+            var incoming = new Dictionary<PreferenceKind, string>();
+            foreach (var preference in source)
+            {
+                incoming[preference.Kind] = preference.Value;
+            }
+
+            foreach (var existing in dbUser.Preferences)
+            {
+                if (incoming.Remove(existing.Kind, out var value))
+                {
+                    existing.Value = value;
+                }
+                else
+                {
+                    dbUser.Preferences.Remove(existing);
+                }
+            }
+
+            foreach (var (kind, value) in incoming)
+            {
+                dbUser.Preferences.Add(new Preference(kind, value));
             }
         }
 
@@ -337,7 +380,6 @@ namespace Jellyfin.Server.Implementations.Users
                         .Include(u => u.Permissions)
                         .FirstOrDefaultAsync(u => u.Id.Equals(userId))
                         .ConfigureAwait(false);
-
                     if (user is null)
                     {
                         throw new ResourceNotFoundException(nameof(userId));
@@ -393,7 +435,6 @@ namespace Jellyfin.Server.Implementations.Users
                         .FirstOrDefaultAsync(u => u.Id == userId)
                         .ConfigureAwait(false)
                         ?? throw new ResourceNotFoundException(nameof(userId));
-
                     if (dbUser.HasPermission(PermissionKind.IsAdministrator) && string.IsNullOrWhiteSpace(newPassword))
                     {
                         throw new ArgumentException("Admin user passwords must not be empty", nameof(newPassword));
@@ -410,15 +451,12 @@ namespace Jellyfin.Server.Implementations.Users
         /// <inheritdoc/>
         public UserDto GetUserDto(User user, string? remoteEndPoint = null)
         {
-            var hasPassword = GetAuthenticationProvider(user).HasPassword(user);
             var castReceiverApplications = _serverConfigurationManager.Configuration.CastReceiverApplications;
             return new UserDto
             {
                 Name = user.Username,
                 Id = user.Id,
                 ServerId = _appHost.SystemId,
-                HasPassword = hasPassword,
-                HasConfiguredPassword = hasPassword,
                 EnableAutoLogin = user.EnableAutoLogin,
                 LastLoginDate = user.LastLoginDate,
                 LastActivityDate = user.LastActivityDate,
@@ -522,7 +560,7 @@ namespace Jellyfin.Server.Implementations.Users
                 }
 
                 var authResult = await AuthenticateLocalUser(username, password, user)
-                                .ConfigureAwait(false);
+                    .ConfigureAwait(false);
                 var authenticationProvider = authResult.AuthenticationProvider;
                 success = authResult.Success;
 
@@ -623,6 +661,12 @@ namespace Jellyfin.Server.Implementations.Users
                                 .SetProperty(f => f.LastActivityDate, date)
                                 .SetProperty(f => f.LastLoginDate, date))
                             .ConfigureAwait(false);
+
+                        // ExecuteUpdateAsync bypasses the change tracker, so keep the
+                        // returned entity in sync. Otherwise SessionManager.LogSessionActivity
+                        // saves this (stale) entity in full and reverts LastLoginDate.
+                        user.LastActivityDate = date;
+                        user.LastLoginDate = date;
                     }
 
                     await dbContext.Users
@@ -638,6 +682,7 @@ namespace Jellyfin.Server.Implementations.Users
                     if (maxInvalidLogins.HasValue && user.InvalidLoginAttemptCount >= maxInvalidLogins)
                     {
                         user.SetPermission(PermissionKind.IsDisabled, true);
+                        dbContext.Update(user);
                         await dbContext.SaveChangesAsync()
                             .ConfigureAwait(false);
                         await _eventManager.PublishAsync(new UserLockedOutEventArgs(user)).ConfigureAwait(false);
@@ -765,9 +810,9 @@ namespace Jellyfin.Server.Implementations.Users
                 await using (dbContext.ConfigureAwait(false))
                 {
                     var user = UserQuery(dbContext)
-                            .AsTracking()
-                            .FirstOrDefault(u => u.Id.Equals(userId))
-                            ?? throw new ArgumentException("No user exists with given Id!");
+                                   .AsTracking()
+                                   .FirstOrDefault(u => u.Id.Equals(userId))
+                               ?? throw new ArgumentException("No user exists with given Id!");
 
                     user.SubtitleMode = config.SubtitleMode;
                     user.HidePlayedInLatest = config.HidePlayedInLatest;
@@ -889,8 +934,20 @@ namespace Jellyfin.Server.Implementations.Users
                 var dbContext = await _dbProvider.CreateDbContextAsync().ConfigureAwait(false);
                 await using (dbContext.ConfigureAwait(false))
                 {
-                    dbContext.Remove(user.ProfileImage);
-                    await dbContext.SaveChangesAsync().ConfigureAwait(false);
+                    // Remove the tracked profile image loaded from the database instead of the
+                    // detached instance on the passed in user. That instance can carry a stale,
+                    // never-persisted (temporary) key, which makes EF Core throw when it is marked
+                    // for deletion, leaving the profile image impossible to clear or replace.
+                    var dbUser = await UserQuery(dbContext)
+                        .AsTracking()
+                        .FirstOrDefaultAsync(u => u.Id == user.Id)
+                        .ConfigureAwait(false);
+                    if (dbUser?.ProfileImage is not null)
+                    {
+                        dbContext.Remove(dbUser.ProfileImage);
+                        dbUser.ProfileImage = null;
+                        await dbContext.SaveChangesAsync().ConfigureAwait(false);
+                    }
                 }
 
                 user.ProfileImage = null;
@@ -899,7 +956,7 @@ namespace Jellyfin.Server.Implementations.Users
 
         internal static void ThrowIfInvalidUsername(string name)
         {
-            if (!string.IsNullOrWhiteSpace(name) && ValidUsernameRegex().IsMatch(name))
+            if (!string.IsNullOrWhiteSpace(name) && ValidUsernameRegex().IsMatch(name) && !string.Equals(name, ".", StringComparison.Ordinal) && !string.Equals(name, "..", StringComparison.Ordinal))
             {
                 return;
             }

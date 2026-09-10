@@ -6,14 +6,17 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Jellyfin.Api.Models.LibraryStructureDto;
 using Jellyfin.Extensions.Json;
+using MediaBrowser.Controller;
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
-using Xunit.Priority;
+using Xunit.v3.Priority;
 
 namespace Jellyfin.Server.Integration.Tests.Controllers;
 
-[TestCaseOrderer(PriorityOrderer.Name, PriorityOrderer.Assembly)]
+[TestCaseOrderer(typeof(PriorityOrderer))]
 public sealed class LibraryStructureControllerTests : IClassFixture<JellyfinApplicationFactory>
 {
     private readonly JellyfinApplicationFactory _factory;
@@ -23,6 +26,45 @@ public sealed class LibraryStructureControllerTests : IClassFixture<JellyfinAppl
     public LibraryStructureControllerTests(JellyfinApplicationFactory factory)
     {
         _factory = factory;
+    }
+
+    [Fact]
+    [Priority(-3)]
+    public async Task AddVirtualFolder_WithWarmDirectoryServiceCache_InvalidatesTheParentListing()
+    {
+        const string Name = "stale-cache-test";
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.AddAuthHeader(_accessToken ??= await AuthHelper.CompleteStartupAsync(client));
+
+        var directoryService = _factory.Services.GetRequiredService<IDirectoryService>();
+        var rootFolderPath = _factory.Services.GetRequiredService<IServerApplicationPaths>().DefaultUserViewsPath;
+
+        // Cache a listing of the libraries root taken before the new folder exists. Everything
+        // resolving through this DirectoryService keeps reading that listing until it is dropped,
+        // so the library stays invisible. Making the caches shared once turned this into a real
+        // test failure, see UpdateLibraryOptions_Valid_Success.
+        Assert.DoesNotContain(
+            directoryService.GetFileSystemEntries(rootFolderPath),
+            x => string.Equals(x.Name, Name, StringComparison.Ordinal));
+
+        var body = new AddVirtualFolderDto()
+        {
+            LibraryOptions = new LibraryOptions()
+            {
+                Enabled = false
+            }
+        };
+
+        using var response = await client.PostAsJsonAsync($"Library/VirtualFolders?name={Name}&refreshLibrary=false", body, _jsonOptions, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        Assert.Contains(
+            directoryService.GetFileSystemEntries(rootFolderPath),
+            x => string.Equals(x.Name, Name, StringComparison.Ordinal));
+
+        using var cleanup = await client.DeleteAsync($"Library/VirtualFolders?name={Name}&refreshLibrary=false", TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.NoContent, cleanup.StatusCode);
     }
 
     [Fact]
@@ -40,7 +82,7 @@ public sealed class LibraryStructureControllerTests : IClassFixture<JellyfinAppl
             }
         };
 
-        using var response = await client.PostAsJsonAsync("Library/VirtualFolders?name=test&refreshLibrary=true", body, _jsonOptions);
+        using var response = await client.PostAsJsonAsync("Library/VirtualFolders?name=test&refreshLibrary=true", body, _jsonOptions, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
     }
 
@@ -57,7 +99,7 @@ public sealed class LibraryStructureControllerTests : IClassFixture<JellyfinAppl
             LibraryOptions = new LibraryOptions()
         };
 
-        using var response = await client.PostAsJsonAsync("Library/VirtualFolders/LibraryOptions", body, _jsonOptions);
+        using var response = await client.PostAsJsonAsync("Library/VirtualFolders/LibraryOptions", body, _jsonOptions, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
@@ -76,16 +118,16 @@ public sealed class LibraryStructureControllerTests : IClassFixture<JellyfinAppl
             }
         };
 
-        using var createResponse = await client.PostAsJsonAsync("Library/VirtualFolders?name=test&refreshLibrary=true", createBody, _jsonOptions);
+        using var createResponse = await client.PostAsJsonAsync("Library/VirtualFolders?name=test&refreshLibrary=true", createBody, _jsonOptions, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.NoContent, createResponse.StatusCode);
 
-        await Task.Delay(2000).ConfigureAwait(true);
+        await Task.Delay(2000, TestContext.Current.CancellationToken).ConfigureAwait(true);
 
-        using var response = await client.GetAsync("Library/VirtualFolders");
+        using var response = await client.GetAsync("Library/VirtualFolders", TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-        var library = await response.Content.ReadFromJsonAsAsyncEnumerable<VirtualFolderInfo>(_jsonOptions)
-            .FirstOrDefaultAsync(x => string.Equals(x?.Name, "test", StringComparison.Ordinal));
+        var library = await response.Content.ReadFromJsonAsAsyncEnumerable<VirtualFolderInfo>(_jsonOptions, TestContext.Current.CancellationToken)
+            .FirstOrDefaultAsync(x => string.Equals(x?.Name, "test", StringComparison.Ordinal), TestContext.Current.CancellationToken);
         Assert.NotNull(library);
 
         var options = library.LibraryOptions;
@@ -99,7 +141,7 @@ public sealed class LibraryStructureControllerTests : IClassFixture<JellyfinAppl
             LibraryOptions = options
         };
 
-        using var response2 = await client.PostAsJsonAsync("Library/VirtualFolders/LibraryOptions", body, _jsonOptions);
+        using var response2 = await client.PostAsJsonAsync("Library/VirtualFolders/LibraryOptions", body, _jsonOptions, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.NoContent, response2.StatusCode);
     }
 
@@ -110,7 +152,59 @@ public sealed class LibraryStructureControllerTests : IClassFixture<JellyfinAppl
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.AddAuthHeader(_accessToken ??= await AuthHelper.CompleteStartupAsync(client));
 
-        using var response = await client.DeleteAsync("Library/VirtualFolders?name=doesntExist");
+        using var response = await client.DeleteAsync("Library/VirtualFolders?name=doesntExist", TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Theory]
+    [Priority(1)]
+    [InlineData("..")]
+    [InlineData("../..")]
+    [InlineData(".")]
+    [InlineData("test/../..")]
+    [InlineData("/var/lib/jellyfin/data")]
+    public async Task DeleteLibrary_PathTraversal_NotFound(string name)
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.AddAuthHeader(_accessToken ??= await AuthHelper.CompleteStartupAsync(client));
+
+        using var response = await client.DeleteAsync($"Library/VirtualFolders?name={Uri.EscapeDataString(name)}", TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Theory]
+    [Priority(1)]
+    [InlineData("..")]
+    [InlineData("../..")]
+    [InlineData(".")]
+    [InlineData("test/../..")]
+    [InlineData("/var/lib/jellyfin/data")]
+    public async Task RenameLibrary_PathTraversalNewName_BadRequest(string newName)
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.AddAuthHeader(_accessToken ??= await AuthHelper.CompleteStartupAsync(client));
+
+        using var response = await client.PostAsync(
+            $"Library/VirtualFolders/Name?name=test&newName={Uri.EscapeDataString(newName)}",
+            null,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Theory]
+    [Priority(1)]
+    [InlineData("..")]
+    [InlineData("../..")]
+    [InlineData("/var/lib/jellyfin/data")]
+    public async Task RenameLibrary_PathTraversalName_NotFound(string name)
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.AddAuthHeader(_accessToken ??= await AuthHelper.CompleteStartupAsync(client));
+
+        using var response = await client.PostAsync(
+            $"Library/VirtualFolders/Name?name={Uri.EscapeDataString(name)}&newName=renamed",
+            null,
+            TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
@@ -121,7 +215,7 @@ public sealed class LibraryStructureControllerTests : IClassFixture<JellyfinAppl
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.AddAuthHeader(_accessToken ??= await AuthHelper.CompleteStartupAsync(client));
 
-        using var response = await client.DeleteAsync("Library/VirtualFolders?name=test&refreshLibrary=true");
+        using var response = await client.DeleteAsync("Library/VirtualFolders?name=test&refreshLibrary=true", TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
     }
 }

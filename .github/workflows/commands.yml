@@ -36,20 +36,23 @@ jobs:
 
   rename:
     name: Rename
-    if: contains(github.event.comment.body, '@jellyfin-bot rename') && github.event.comment.author_association == 'MEMBER'
+    if: contains(github.event.comment.body, '@jellyfin-bot rename')
     runs-on: ubuntu-latest
     steps:
       - name: pull in script
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jellyfin/jellyfin-triage-script
+
       - name: install python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14'
           cache: 'pip'
+
       - name: install python packages
         run: pip install -r rename/requirements.txt
+
       - name: run rename script
         run: python3 rename.py
         working-directory: ./rename

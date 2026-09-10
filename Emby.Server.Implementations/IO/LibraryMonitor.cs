@@ -8,6 +8,7 @@ using Emby.Server.Implementations.Library;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.IO;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -21,6 +22,8 @@ namespace Emby.Server.Implementations.IO
         private readonly ILibraryManager _libraryManager;
         private readonly IServerConfigurationManager _configurationManager;
         private readonly IFileSystem _fileSystem;
+        private readonly IDirectoryService _directoryService;
+        private readonly DotIgnoreIgnoreRule _dotIgnoreIgnoreRule;
 
         /// <summary>
         /// The file system watchers.
@@ -46,20 +49,27 @@ namespace Emby.Server.Implementations.IO
         /// <param name="libraryManager">The library manager.</param>
         /// <param name="configurationManager">The configuration manager.</param>
         /// <param name="fileSystem">The filesystem.</param>
+        /// <param name="directoryService">The directory service.</param>
         /// <param name="appLifetime">The <see cref="IHostApplicationLifetime"/>.</param>
+        /// <param name="dotIgnoreIgnoreRule">The .ignore rule handler.</param>
         public LibraryMonitor(
             ILogger<LibraryMonitor> logger,
             ILibraryManager libraryManager,
             IServerConfigurationManager configurationManager,
             IFileSystem fileSystem,
-            IHostApplicationLifetime appLifetime)
+            IDirectoryService directoryService,
+            IHostApplicationLifetime appLifetime,
+            DotIgnoreIgnoreRule dotIgnoreIgnoreRule)
         {
             _libraryManager = libraryManager;
             _logger = logger;
             _configurationManager = configurationManager;
             _fileSystem = fileSystem;
+            _directoryService = directoryService;
+            _dotIgnoreIgnoreRule = dotIgnoreIgnoreRule;
 
             appLifetime.ApplicationStarted.Register(Start);
+            appLifetime.ApplicationStopping.Register(Stop);
         }
 
         /// <inheritdoc />
@@ -353,10 +363,12 @@ namespace Emby.Server.Implementations.IO
             }
 
             var fileInfo = _fileSystem.GetFileSystemInfo(path);
-            if (DotIgnoreIgnoreRule.IsIgnored(fileInfo, null))
+            if (_dotIgnoreIgnoreRule.ShouldIgnore(fileInfo, null))
             {
                 return;
             }
+
+            _directoryService.Invalidate(path);
 
             // Ignore certain files, If the parent of an ignored path has a change event, ignore that too
             foreach (var i in _tempIgnoredPaths.Keys)

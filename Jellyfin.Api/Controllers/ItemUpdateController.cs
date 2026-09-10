@@ -180,11 +180,14 @@ public class ItemUpdateController : BaseJellyfinApiController
                 info.ContentTypeOptions = GetContentTypeOptions(true).ToArray();
                 info.ContentType = configuredContentType;
 
-                if (inheritedContentType is null || inheritedContentType == CollectionType.tvshows)
+                if (inheritedContentType is null
+                    || inheritedContentType == CollectionType.tvshows
+                    || inheritedContentType == CollectionType.movies)
                 {
                     info.ContentTypeOptions = info.ContentTypeOptions
                         .Where(i => string.IsNullOrWhiteSpace(i.Value)
-                                    || string.Equals(i.Value, "TvShows", StringComparison.OrdinalIgnoreCase))
+                                    || string.Equals(i.Value, "TvShows", StringComparison.OrdinalIgnoreCase)
+                                    || string.Equals(i.Value, "Movies", StringComparison.OrdinalIgnoreCase))
                         .ToArray();
                 }
             }
@@ -233,12 +236,13 @@ public class ItemUpdateController : BaseJellyfinApiController
         return NoContent();
     }
 
-    private async Task UpdateItem(BaseItemDto request, BaseItem item)
+    internal async Task UpdateItem(BaseItemDto request, BaseItem item)
     {
         item.Name = request.Name;
         item.ForcedSortName = request.ForcedSortName;
 
         item.OriginalTitle = string.IsNullOrWhiteSpace(request.OriginalTitle) ? null : request.OriginalTitle;
+        item.OriginalLanguage = string.IsNullOrWhiteSpace(request.OriginalLanguage) ? null : request.OriginalLanguage;
 
         item.CriticRating = request.CriticRating;
 
@@ -246,7 +250,11 @@ public class ItemUpdateController : BaseJellyfinApiController
         item.IndexNumber = request.IndexNumber;
         item.ParentIndexNumber = request.ParentIndexNumber;
         item.Overview = request.Overview;
-        item.Genres = request.Genres;
+
+        if (request.Genres is not null)
+        {
+            item.Genres = request.Genres.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
 
         if (item is Episode episode)
         {
@@ -267,12 +275,17 @@ public class ItemUpdateController : BaseJellyfinApiController
 
         if (request.Studios is not null)
         {
-            item.Studios = Array.ConvertAll(request.Studios, x => x.Name);
+            item.Studios = Array.ConvertAll(request.Studios, x => x.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         }
 
         if (request.DateCreated.HasValue)
         {
             item.DateCreated = NormalizeDateTime(request.DateCreated.Value);
+        }
+
+        if (request.SeriesName is not null && item is IHasSeries hasSeries)
+        {
+            hasSeries.SeriesName = request.SeriesName;
         }
 
         item.EndDate = request.EndDate.HasValue ? NormalizeDateTime(request.EndDate.Value) : null;
@@ -284,15 +297,27 @@ public class ItemUpdateController : BaseJellyfinApiController
         item.CustomRating = request.CustomRating;
 
         var currentTags = item.Tags;
-        var newTags = request.Tags;
-        var removedTags = currentTags.Except(newTags).ToList();
-        var addedTags = newTags.Except(currentTags).ToList();
-        item.Tags = newTags;
+        List<string> removedTags;
+        List<string> addedTags;
+        if (request.Tags is not null)
+        {
+            var newTags = request.Tags.Select(t => t.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            removedTags = currentTags.Except(newTags).ToList();
+            addedTags = newTags.Except(currentTags).ToList();
+            item.Tags = newTags;
+        }
+        else
+        {
+            removedTags = [];
+            addedTags = [];
+        }
 
         if (item is Series rseries)
         {
             foreach (var season in rseries.Children.OfType<Season>())
             {
+                season.SeriesName = rseries.Name;
+
                 if (!season.LockedFields.Contains(MetadataField.OfficialRating))
                 {
                     season.OfficialRating = request.OfficialRating;
@@ -310,6 +335,8 @@ public class ItemUpdateController : BaseJellyfinApiController
 
                 foreach (var ep in season.Children.OfType<Episode>())
                 {
+                    ep.SeriesName = rseries.Name;
+
                     if (!ep.LockedFields.Contains(MetadataField.OfficialRating))
                     {
                         ep.OfficialRating = request.OfficialRating;
@@ -370,7 +397,7 @@ public class ItemUpdateController : BaseJellyfinApiController
 
         if (request.ProductionLocations is not null)
         {
-            item.ProductionLocations = request.ProductionLocations;
+            item.ProductionLocations = request.ProductionLocations.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         }
 
         item.PreferredMetadataCountryCode = request.PreferredMetadataCountryCode;
@@ -399,15 +426,10 @@ public class ItemUpdateController : BaseJellyfinApiController
             item.RunTimeTicks = request.RunTimeTicks;
         }
 
-        foreach (var pair in request.ProviderIds.ToList())
+        if (request.ProviderIds is not null)
         {
-            if (string.IsNullOrEmpty(pair.Value))
-            {
-                request.ProviderIds.Remove(pair.Key);
-            }
+            item.SetProviderIds(request.ProviderIds);
         }
-
-        item.ProviderIds = request.ProviderIds;
 
         if (item is Video video)
         {
@@ -418,7 +440,7 @@ public class ItemUpdateController : BaseJellyfinApiController
         {
             if (item is IHasAlbumArtist hasAlbumArtists)
             {
-                hasAlbumArtists.AlbumArtists = Array.ConvertAll(request.AlbumArtists, i => i.Name.Trim());
+                hasAlbumArtists.AlbumArtists = Array.ConvertAll(request.AlbumArtists, i => i.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             }
         }
 
@@ -426,7 +448,7 @@ public class ItemUpdateController : BaseJellyfinApiController
         {
             if (item is IHasArtist hasArtists)
             {
-                hasArtists.Artists = Array.ConvertAll(request.ArtistItems, i => i.Name.Trim());
+                hasArtists.Artists = Array.ConvertAll(request.ArtistItems, i => i.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             }
         }
 

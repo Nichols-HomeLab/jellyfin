@@ -22,13 +22,12 @@ using MediaBrowser.Controller.Channels;
 using MediaBrowser.Controller.Chapters;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Dto;
-using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.TV;
-using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaSegments;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Globalization;
@@ -48,6 +47,10 @@ namespace MediaBrowser.Controller.Entities
         private BaseItemKind? _baseItemKind;
 
         public const string ThemeSongFileName = "theme";
+
+        // Well below the 255 byte limit of the common Linux filesystems and the 255 character limit
+        // of Windows, so the files inside the folder still fit within MAX_PATH.
+        private const int MaxItemByNameFolderNameBytes = 128;
 
         /// <summary>
         /// The supported image extensions.
@@ -89,11 +92,15 @@ namespace MediaBrowser.Controller.Entities
             Model.Entities.ExtraType.Short
         };
 
+        private protected static readonly char[] VersionDelimiters = ['-', '_', '.'];
+
         private string _sortName;
 
         private string _forcedSortName;
 
         private string _name;
+
+        private string _originalLanguage;
 
         public const char SlugChar = '-';
 
@@ -107,7 +114,6 @@ namespace MediaBrowser.Controller.Entities
             ImageInfos = Array.Empty<ItemImageInfo>();
             ProductionLocations = Array.Empty<string>();
             RemoteTrailers = Array.Empty<MediaUrl>();
-            ExtraIds = Array.Empty<Guid>();
             UserData = [];
         }
 
@@ -217,6 +223,13 @@ namespace MediaBrowser.Controller.Entities
 
         [JsonIgnore]
         public string OriginalTitle { get; set; }
+
+        [JsonIgnore]
+        public string OriginalLanguage
+        {
+            get => _originalLanguage;
+            set => _originalLanguage = LocalizationManager?.FindLanguageInfo(value)?.TwoLetterISOLanguageName ?? value;
+        }
 
         /// <summary>
         /// Gets or sets the id.
@@ -398,8 +411,6 @@ namespace MediaBrowser.Controller.Entities
 
         public int Height { get; set; }
 
-        public Guid[] ExtraIds { get; set; }
-
         /// <summary>
         /// Gets the primary image path.
         /// </summary>
@@ -492,6 +503,8 @@ namespace MediaBrowser.Controller.Entities
 
         public static IItemRepository ItemRepository { get; set; }
 
+        public static IItemCountService ItemCountService { get; set; }
+
         public static IChapterManager ChapterManager { get; set; }
 
         public static IFileSystem FileSystem { get; set; }
@@ -532,8 +545,8 @@ namespace MediaBrowser.Controller.Entities
                 {
                     if (!string.IsNullOrEmpty(ForcedSortName))
                     {
-                        // Need the ToLower because that's what CreateSortName does
-                        _sortName = ModifySortChunks(ForcedSortName).ToLowerInvariant();
+                        // Run the forced sort name through the same cleaning as auto-generated sort names.
+                        _sortName = GetSortName(ForcedSortName, EnableAlphaNumericSorting, ConfigurationManager.Configuration);
                     }
                     else
                     {
@@ -762,6 +775,17 @@ namespace MediaBrowser.Controller.Entities
         [JsonIgnore]
         protected virtual bool SupportsOwnedItems => !ParentId.IsEmpty() && IsFileProtocol;
 
+        /// <summary>
+        /// Gets a value indicating whether this item searches the folder it lives in for its own extras.
+        /// </summary>
+        [JsonIgnore]
+        protected virtual bool SearchesContainingFolderForExtras =>
+            IsFileProtocol
+            && SupportsOwnedItems
+            && !IsInMixedFolder
+            && this is not (ICollectionFolder or UserRootFolder or AggregateFolder)
+            && GetType() != typeof(Folder);
+
         [JsonIgnore]
         public virtual bool SupportsPeople => false;
 
@@ -918,19 +942,68 @@ namespace MediaBrowser.Controller.Entities
         /// <returns>System.String.</returns>
         protected virtual string CreateSortName()
         {
-            if (Name is null)
+            return GetSortName(Name, EnableAlphaNumericSorting, ConfigurationManager.Configuration);
+        }
+
+        /// <summary>
+        /// Turns an item-by-name entity's name into a folder name every supported filesystem accepts.
+        /// </summary>
+        /// <param name="name">The entity's name.</param>
+        /// <returns>The folder name.</returns>
+        public static string GetItemByNameFolderName(string name)
+        {
+            // Trim the period at the end because windows will have a hard time with that
+            var validName = FileSystem.GetValidFilename(name).Trim().TrimEnd('.');
+
+            // Most Linux filesystems cap a path component at 255 bytes, so a name past that cannot be
+            // turned into a folder at all - and an entity with no folder can never be created, which
+            // leaves the credit behind it stuck: not refreshable, not deletable, retried on every scan.
+            // Only broken provider data gets this long, but it still has to resolve to something, so
+            // keep a readable prefix and let a hash of the whole name tell two of them apart.
+            if (Encoding.UTF8.GetByteCount(validName) <= MaxItemByNameFolderNameBytes)
+            {
+                return validName;
+            }
+
+            var suffix = "-" + validName.GetMD5().ToString("N", CultureInfo.InvariantCulture);
+            var budget = MaxItemByNameFolderNameBytes - suffix.Length;
+            var length = Math.Min(validName.Length, budget);
+            while (length > 0 && Encoding.UTF8.GetByteCount(validName.AsSpan(0, length)) > budget)
+            {
+                length--;
+            }
+
+            // Never cut a surrogate pair in half, the lone half is not a valid file name character.
+            if (length > 0 && char.IsHighSurrogate(validName[length - 1]))
+            {
+                length--;
+            }
+
+            return string.Concat(validName.AsSpan(0, length).TrimEnd().TrimEnd('.'), suffix);
+        }
+
+        /// <summary>
+        /// Cleans a raw name into its sortable form by applying the configured sort rules.
+        /// </summary>
+        /// <param name="name">The raw name to clean.</param>
+        /// <param name="enableAlphaNumericSorting">Whether alphanumeric sorting rules should be applied.</param>
+        /// <param name="configuration">The server configuration providing the sort rules.</param>
+        /// <returns>The cleaned, sortable name, or <c>null</c> if <paramref name="name"/> is <c>null</c>.</returns>
+        public static string GetSortName(string name, bool enableAlphaNumericSorting, ServerConfiguration configuration)
+        {
+            if (name is null)
             {
                 return null; // some items may not have name filled in properly
             }
 
-            if (!EnableAlphaNumericSorting)
+            if (!enableAlphaNumericSorting)
             {
-                return Name.TrimStart();
+                return name.TrimStart();
             }
 
-            var sortable = Name.Trim().ToLowerInvariant();
+            var sortable = name.Trim().ToLowerInvariant();
 
-            foreach (var search in ConfigurationManager.Configuration.SortRemoveWords)
+            foreach (var search in configuration.SortRemoveWords)
             {
                 // Remove from beginning if a space follows
                 if (sortable.StartsWith(search + " ", StringComparison.Ordinal))
@@ -948,12 +1021,12 @@ namespace MediaBrowser.Controller.Entities
                 }
             }
 
-            foreach (var removeChar in ConfigurationManager.Configuration.SortRemoveCharacters)
+            foreach (var removeChar in configuration.SortRemoveCharacters)
             {
                 sortable = sortable.Replace(removeChar, string.Empty, StringComparison.Ordinal);
             }
 
-            foreach (var replaceChar in ConfigurationManager.Configuration.SortReplaceCharacters)
+            foreach (var replaceChar in configuration.SortReplaceCharacters)
             {
                 sortable = sortable.Replace(replaceChar, " ", StringComparison.Ordinal);
             }
@@ -1093,8 +1166,9 @@ namespace MediaBrowser.Controller.Entities
                 }
             }
 
-            var list = GetAllItemsForMediaSources();
-            var result = list.Select(i => GetVersionInfo(enablePathSubstitution, i.Item, i.MediaSourceType)).ToList();
+            var list = GetAllItemsForMediaSources().ToList();
+            var commonPrefix = GetCommonNamePrefix(list);
+            var result = list.Select(i => GetVersionInfo(enablePathSubstitution, i.Item, i.MediaSourceType, commonPrefix)).ToList();
 
             if (IsActiveRecording())
             {
@@ -1104,17 +1178,15 @@ namespace MediaBrowser.Controller.Entities
                 }
             }
 
-            return result.OrderBy(i =>
-            {
-                if (i.VideoType == VideoType.VideoFile)
-                {
-                    return 0;
-                }
+            // The source belonging to the item being queried sorts first so it is the default the client plays.
+            var selfId = Id.ToString("N", CultureInfo.InvariantCulture);
 
-                return 1;
-            }).ThenBy(i => i.Video3DFormat.HasValue ? 1 : 0)
-            .ThenByDescending(i => i, new MediaSourceWidthComparator())
-            .ToArray();
+            return result
+                .OrderByDescending(i => string.Equals(i.Id, selfId, StringComparison.OrdinalIgnoreCase))
+                .ThenBy(i => i.VideoType == VideoType.VideoFile ? 0 : 1)
+                .ThenBy(i => i.Video3DFormat.HasValue ? 1 : 0)
+                .ThenByDescending(i => i, new MediaSourceWidthComparator())
+                .ToArray();
         }
 
         protected virtual IEnumerable<(BaseItem Item, MediaSourceType MediaSourceType)> GetAllItemsForMediaSources()
@@ -1122,20 +1194,12 @@ namespace MediaBrowser.Controller.Entities
             return Enumerable.Empty<(BaseItem, MediaSourceType)>();
         }
 
-        private MediaSourceInfo GetVersionInfo(bool enablePathSubstitution, BaseItem item, MediaSourceType type)
+        private MediaSourceInfo GetVersionInfo(bool enablePathSubstitution, BaseItem item, MediaSourceType type, string commonPrefix = null)
         {
             ArgumentNullException.ThrowIfNull(item);
 
             var protocol = item.PathProtocol;
-
-            // Resolve the item path so everywhere we use the media source it will always point to
-            // the correct path even if symlinks are in use. Calling ResolveLinkTarget on a non-link
-            // path will return null, so it's safe to check for all paths.
             var itemPath = item.Path;
-            if (protocol is MediaProtocol.File && FileSystemHelper.ResolveLinkTarget(itemPath, returnFinalTarget: true) is { Exists: true } linkInfo)
-            {
-                itemPath = linkInfo.FullName;
-            }
 
             var info = new MediaSourceInfo
             {
@@ -1143,7 +1207,7 @@ namespace MediaBrowser.Controller.Entities
                 Protocol = protocol ?? MediaProtocol.File,
                 MediaStreams = MediaSourceManager.GetMediaStreams(item.Id),
                 MediaAttachments = MediaSourceManager.GetMediaAttachments(item.Id),
-                Name = GetMediaSourceName(item),
+                Name = GetMediaSourceName(item, commonPrefix),
                 Path = enablePathSubstitution ? GetMappedPath(item, itemPath, protocol) : itemPath,
                 RunTimeTicks = item.RunTimeTicks,
                 Container = item.Container,
@@ -1222,7 +1286,7 @@ namespace MediaBrowser.Controller.Entities
             return info;
         }
 
-        internal string GetMediaSourceName(BaseItem item)
+        internal string GetMediaSourceName(BaseItem item, string commonPrefix = null)
         {
             var terms = new List<string>();
 
@@ -1230,12 +1294,31 @@ namespace MediaBrowser.Controller.Entities
             if (item.IsFileProtocol && !string.IsNullOrEmpty(path))
             {
                 var displayName = System.IO.Path.GetFileNameWithoutExtension(path);
-                if (HasLocalAlternateVersions)
+
+                // Prefer the suffix that differs from the other versions: strip the prefix shared by
+                // all sibling files. This works regardless of folder layout, so it also labels episode
+                // versions that share a season folder (e.g. "Greyscale" instead of the full
+                // "Show - S01E02 - Title - Greyscale"). The prefix is already retreated to a delimiter
+                // boundary (see GetCommonVersionPrefix).
+                if (!string.IsNullOrEmpty(commonPrefix)
+                    && displayName.Length > commonPrefix.Length
+                    && displayName.StartsWith(commonPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    var name = displayName.AsSpan(commonPrefix.Length).TrimStart([' ', .. VersionDelimiters]);
+                    if (!name.IsWhiteSpace())
+                    {
+                        terms.Add(name.ToString());
+                    }
+                }
+
+                // Fall back to the containing folder name (the common layout for movie versions, and
+                // the path taken when no common prefix could be derived).
+                if (terms.Count == 0 && HasLocalAlternateVersions)
                 {
                     var containingFolderName = System.IO.Path.GetFileName(ContainingFolderPath);
                     if (displayName.Length > containingFolderName.Length && displayName.StartsWith(containingFolderName, StringComparison.OrdinalIgnoreCase))
                     {
-                        var name = displayName.AsSpan(containingFolderName.Length).TrimStart([' ', '-']);
+                        var name = displayName.AsSpan(containingFolderName.Length).TrimStart([' ', .. VersionDelimiters]);
                         if (!name.IsWhiteSpace())
                         {
                             terms.Add(name.ToString());
@@ -1292,6 +1375,98 @@ namespace MediaBrowser.Controller.Entities
             return string.Join('/', terms);
         }
 
+        /// <summary>
+        /// Derives the prefix shared by the supplied media source items' file names, used to strip the
+        /// common part and surface a short version label per source. Returns null when there are fewer
+        /// than two file-based sources, since there is nothing to differentiate.
+        /// </summary>
+        /// <param name="items">The media source items.</param>
+        /// <returns>The shared prefix, or null when no useful prefix exists.</returns>
+        private static string GetCommonNamePrefix(IReadOnlyList<(BaseItem Item, MediaSourceType MediaSourceType)> items)
+        {
+            var fileNames = new List<string>();
+            foreach (var (item, _) in items)
+            {
+                if (item.IsFileProtocol && !string.IsNullOrEmpty(item.Path))
+                {
+                    fileNames.Add(System.IO.Path.GetFileNameWithoutExtension(item.Path));
+                }
+            }
+
+            if (fileNames.Count < 2)
+            {
+                return null;
+            }
+
+            var prefix = GetCommonVersionPrefix(fileNames);
+            return string.IsNullOrEmpty(prefix) ? null : prefix;
+        }
+
+        /// <summary>
+        /// Computes the case-insensitive longest common prefix of the supplied version file names,
+        /// retreated to the last delimiter boundary. Retreating keeps the differing suffix intact:
+        /// it avoids slicing through a word every version shares (e.g. "Grey" in "Greyscale" and
+        /// "Greyish") while still trimming the common part when every version is suffixed (e.g.
+        /// "- Greyscale" / "- Colorized"). It prefers a structural delimiter ('-', '_', '.') so a
+        /// token shared by the descriptors but separated only by spaces (e.g. a common "2160p ") is
+        /// kept in the label, falling back to a space only when no structural delimiter is shared. The
+        /// separators mirror the version delimiters recognised by the naming layer (Emby.Naming
+        /// VideoFlagDelimiters).
+        /// </summary>
+        /// <param name="fileNames">The version file names without extension; must contain at least one entry.</param>
+        /// <returns>The shared prefix retreated to a separator boundary, or an empty string when none is shared.</returns>
+        internal static string GetCommonVersionPrefix(IReadOnlyList<string> fileNames)
+        {
+            var prefix = fileNames[0];
+            for (var i = 1; i < fileNames.Count && prefix.Length > 0; i++)
+            {
+                var name = fileNames[i];
+                var length = Math.Min(prefix.Length, name.Length);
+                var common = 0;
+                while (common < length && char.ToUpperInvariant(prefix[common]) == char.ToUpperInvariant(name[common]))
+                {
+                    common++;
+                }
+
+                prefix = prefix[..common];
+            }
+
+            // If the common prefix is itself a whole file name then one version is unlabelled (the
+            // base name); the boundary already sits at the end of that name, so don't retreat into it.
+            var prefixIsWholeName = false;
+            for (var i = 0; i < fileNames.Count; i++)
+            {
+                if (fileNames[i].Length == prefix.Length)
+                {
+                    prefixIsWholeName = true;
+                    break;
+                }
+            }
+
+            if (!prefixIsWholeName)
+            {
+                // Retreat to the last structural delimiter ('-', '_', '.').
+                var cut = prefix.Length;
+                while (cut > 0 && Array.IndexOf(VersionDelimiters, prefix[cut - 1]) < 0)
+                {
+                    cut--;
+                }
+
+                if (cut == 0)
+                {
+                    cut = prefix.Length;
+                    while (cut > 0 && prefix[cut - 1] != ' ')
+                    {
+                        cut--;
+                    }
+                }
+
+                prefix = prefix[..cut];
+            }
+
+            return prefix;
+        }
+
         public Task RefreshMetadata(CancellationToken cancellationToken)
         {
             return RefreshMetadata(new MetadataRefreshOptions(new DirectoryService(FileSystem)), cancellationToken);
@@ -1341,14 +1516,15 @@ namespace MediaBrowser.Controller.Entities
                 return false;
             }
 
-            if (GetParents().Any(i => !i.IsVisible(user, true)))
+            var parents = GetParents().ToList();
+            if (parents.Any(i => !i.IsVisible(user, true)))
             {
                 return false;
             }
 
             if (checkFolders)
             {
-                var topParent = GetParents().LastOrDefault() ?? this;
+                var topParent = parents.Count > 0 ? parents[^1] : this;
 
                 if (string.IsNullOrEmpty(topParent.Path))
                 {
@@ -1359,8 +1535,27 @@ namespace MediaBrowser.Controller.Entities
 
                 if (itemCollectionFolders.Count > 0)
                 {
-                    var userCollectionFolders = LibraryManager.GetUserRootFolder().GetChildren(user, true).Select(i => i.Id).ToList();
-                    if (!itemCollectionFolders.Any(userCollectionFolders.Contains))
+                    var blockedMediaFolders = user.GetPreferenceValues<Guid>(PreferenceKind.BlockedMediaFolders);
+                    IEnumerable<Guid> userCollectionFolderIds;
+                    if (blockedMediaFolders.Length > 0)
+                    {
+                        // User has blocked folders - get all library folders and exclude blocked ones
+                        userCollectionFolderIds = LibraryManager.GetUserRootFolder().Children
+                            .Select(i => i.Id)
+                            .Where(id => !blockedMediaFolders.Contains(id));
+                    }
+                    else if (user.HasPermission(PermissionKind.EnableAllFolders))
+                    {
+                        // User can access all folders - no need to filter
+                        return true;
+                    }
+                    else
+                    {
+                        // User has specific enabled folders
+                        userCollectionFolderIds = user.GetPreferenceValues<Guid>(PreferenceKind.EnabledFolders);
+                    }
+
+                    if (!itemCollectionFolders.Any(userCollectionFolderIds.Contains))
                     {
                         return false;
                     }
@@ -1385,7 +1580,14 @@ namespace MediaBrowser.Controller.Entities
         /// <returns><c>true</c> if any items have changed, else <c>false</c>.</returns>
         protected virtual async Task<bool> RefreshedOwnedItems(MetadataRefreshOptions options, IReadOnlyList<FileSystemMetadata> fileSystemChildren, CancellationToken cancellationToken)
         {
-            if (!IsFileProtocol || !SupportsOwnedItems || IsInMixedFolder || this is ICollectionFolder or UserRootFolder or AggregateFolder || this.GetType() == typeof(Folder))
+            if (!SearchesContainingFolderForExtras)
+            {
+                return false;
+            }
+
+            if (GetParent() is Folder container
+                && container.SearchesContainingFolderForExtras
+                && string.Equals(container.Path, ContainingFolderPath, StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }
@@ -1400,32 +1602,63 @@ namespace MediaBrowser.Controller.Entities
 
         private async Task<bool> RefreshExtras(BaseItem item, MetadataRefreshOptions options, IReadOnlyList<FileSystemMetadata> fileSystemChildren, CancellationToken cancellationToken)
         {
+            // An extra is owned by the version it is named after, so all of them are maintained together.
+            var currentExtras = LibraryManager.GetItemList(new InternalItemsQuery()
+            {
+                OwnerIds = item.GetOwnedVersionIds()
+            }).Where(e => e.ExtraType.HasValue).ToList();
+
+            var currentExtraIds = currentExtras.Select(e => e.Id).ToArray();
+
+            // Snapshot the persisted names before resolving, as FindExtras corrects the name on the
+            // items it hands back and may well hand back these very instances.
+            var currentExtraNames = new Dictionary<Guid, string>();
+            foreach (var extra in currentExtras)
+            {
+                currentExtraNames[extra.Id] = extra.Name;
+            }
+
             var extras = LibraryManager.FindExtras(item, fileSystemChildren, options.DirectoryService).ToArray();
             var newExtraIds = Array.ConvertAll(extras, x => x.Id);
-            var extrasChanged = !item.ExtraIds.SequenceEqual(newExtraIds);
 
-            if (!extrasChanged && !options.ReplaceAllMetadata && options.MetadataRefreshMode != MetadataRefreshMode.FullRefresh)
+            var renamedExtraIds = extras
+                .Where(e => currentExtraNames.TryGetValue(e.Id, out var oldName) && !string.Equals(oldName, e.Name, StringComparison.Ordinal))
+                .Select(e => e.Id)
+                .ToHashSet();
+
+            var extrasChanged = !currentExtraIds.OrderBy(x => x).SequenceEqual(newExtraIds.OrderBy(x => x));
+
+            if (!extrasChanged && renamedExtraIds.Count == 0 && !options.ReplaceAllMetadata && options.MetadataRefreshMode != MetadataRefreshMode.FullRefresh)
             {
+                // The owner's dates may only have become known after its extras were created, so keep
+                // them in sync even when there is nothing to refresh.
+                foreach (var extra in currentExtras)
+                {
+                    if (extra.ExtraType is not null && InheritDatesFromOwner(item, extra))
+                    {
+                        await extra.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
                 return false;
             }
 
-            var ownerId = item.Id;
-
             var tasks = extras.Select(i =>
             {
+                var ownerId = item.GetOwnerIdForExtra(i);
                 var subOptions = new MetadataRefreshOptions(options);
-                if (!i.OwnerId.Equals(ownerId) || !i.ParentId.IsEmpty())
+                if (!i.OwnerId.Equals(ownerId) || !i.ParentId.IsEmpty() || renamedExtraIds.Contains(i.Id))
                 {
-                    i.OwnerId = ownerId;
-                    i.ParentId = Guid.Empty;
                     subOptions.ForceSave = true;
                 }
+
+                i.OwnerId = ownerId;
+                i.ParentId = Guid.Empty;
 
                 return RefreshMetadataForOwnedItem(i, true, subOptions, cancellationToken);
             });
 
-            // Cleanup removed extras
-            var removedExtraIds = item.ExtraIds.Where(e => !newExtraIds.Contains(e)).ToArray();
+            var removedExtraIds = currentExtraIds.Where(e => !newExtraIds.Contains(e)).ToArray();
             if (removedExtraIds.Length > 0)
             {
                 var removedExtras = LibraryManager.GetItemList(new InternalItemsQuery()
@@ -1434,16 +1667,19 @@ namespace MediaBrowser.Controller.Entities
                 });
                 foreach (var removedExtra in removedExtras)
                 {
-                    LibraryManager.DeleteItem(removedExtra, new DeleteOptions()
+                    // Only delete items that are actual extras (have ExtraType set)
+                    // Items with OwnerId but no ExtraType might be alternate versions, not extras
+                    if (removedExtra.ExtraType.HasValue)
                     {
-                        DeleteFileLocation = false
-                    });
+                        LibraryManager.DeleteItem(removedExtra, new DeleteOptions()
+                        {
+                            DeleteFileLocation = false
+                        });
+                    }
                 }
             }
 
             await Task.WhenAll(tasks).ConfigureAwait(false);
-
-            item.ExtraIds = newExtraIds;
 
             return true;
         }
@@ -1535,7 +1771,7 @@ namespace MediaBrowser.Controller.Entities
         }
 
         /// <summary>
-        /// Gets the preferred metadata language.
+        /// Gets the preferred metadata country code.
         /// </summary>
         /// <returns>System.String.</returns>
         public string GetPreferredMetadataCountryCode()
@@ -1567,6 +1803,15 @@ namespace MediaBrowser.Controller.Entities
             }
 
             return lang;
+        }
+
+        /// <summary>
+        /// Gets the original language of the item, inheriting from parent items if necessary.
+        /// </summary>
+        /// <returns>System.String.</returns>
+        public virtual string GetInheritedOriginalLanguage()
+        {
+            return OriginalLanguage;
         }
 
         public virtual bool IsSaveLocalMetadataEnabled()
@@ -1608,11 +1853,10 @@ namespace MediaBrowser.Controller.Entities
 
             if (string.IsNullOrEmpty(rating))
             {
-                Logger.LogDebug("{0} has no parental rating set.", Name);
                 return !GetBlockUnratedValue(user);
             }
 
-            var ratingScore = LocalizationManager.GetRatingScore(rating);
+            var ratingScore = LocalizationManager.GetRatingScore(rating, GetPreferredMetadataCountryCode());
 
             // Could not determine rating level
             if (ratingScore is null)
@@ -1654,7 +1898,7 @@ namespace MediaBrowser.Controller.Entities
                 return null;
             }
 
-            return LocalizationManager.GetRatingScore(rating);
+            return LocalizationManager.GetRatingScore(rating, GetPreferredMetadataCountryCode());
         }
 
         public List<string> GetInheritedTags()
@@ -1675,10 +1919,28 @@ namespace MediaBrowser.Controller.Entities
             return list.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
 
-        private bool IsVisibleViaTags(User user, bool skipAllowedTagsCheck)
+        protected bool IsVisibleViaTags(User user, bool skipAllowedTagsCheck)
         {
-            var allTags = GetInheritedTags();
-            if (user.GetPreference(PreferenceKind.BlockedTags).Any(i => allTags.Contains(i, StringComparison.OrdinalIgnoreCase)))
+            var blockedTags = user.GetPreference(PreferenceKind.BlockedTags);
+            var allowedTags = user.GetPreference(PreferenceKind.AllowedTags);
+
+            if (blockedTags.Length == 0 && allowedTags.Length == 0)
+            {
+                return true;
+            }
+
+            // Normalize tags using the same logic as database queries
+            var normalizedBlockedTags = blockedTags
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Select(t => t.GetCleanValue())
+                .ToHashSet(StringComparer.Ordinal);
+
+            var normalizedItemTags = GetInheritedTags()
+                .Select(t => t.GetCleanValue())
+                .ToHashSet(StringComparer.Ordinal);
+
+            // Check blocked tags - item is hidden if it has any blocked tag
+            if (normalizedBlockedTags.Overlaps(normalizedItemTags))
             {
                 return false;
             }
@@ -1689,10 +1951,18 @@ namespace MediaBrowser.Controller.Entities
                 return true;
             }
 
-            var allowedTagsPreference = user.GetPreference(PreferenceKind.AllowedTags);
-            if (!skipAllowedTagsCheck && allowedTagsPreference.Length != 0 && !allowedTagsPreference.Any(i => allTags.Contains(i, StringComparison.OrdinalIgnoreCase)))
+            // Check allowed tags - item must have at least one allowed tag
+            if (!skipAllowedTagsCheck && allowedTags.Length > 0)
             {
-                return false;
+                var normalizedAllowedTags = allowedTags
+                    .Where(t => !string.IsNullOrWhiteSpace(t))
+                    .Select(t => t.GetCleanValue())
+                    .ToHashSet(StringComparer.Ordinal);
+
+                if (!normalizedAllowedTags.Overlaps(normalizedItemTags))
+                {
+                    return false;
+                }
             }
 
             return true;
@@ -1805,10 +2075,23 @@ namespace MediaBrowser.Controller.Entities
             return item;
         }
 
+#pragma warning disable CS0618 // Type or member is obsolete - fallback for legacy LinkedChild data
         private BaseItem FindLinkedChild(LinkedChild info)
         {
-            var path = info.Path;
+            // First try to find by ItemId (new preferred method)
+            if (info.ItemId.HasValue && !info.ItemId.Value.Equals(Guid.Empty))
+            {
+                var item = LibraryManager.GetItemById(info.ItemId.Value);
+                if (item is not null)
+                {
+                    return item;
+                }
 
+                Logger.LogWarning("Unable to find linked item by ItemId {0}", info.ItemId);
+            }
+
+            // Fall back to Path (legacy method)
+            var path = info.Path;
             if (!string.IsNullOrEmpty(path))
             {
                 path = FileSystem.MakeAbsolutePath(ContainingFolderPath, path);
@@ -1823,13 +2106,14 @@ namespace MediaBrowser.Controller.Entities
                 return itemByPath;
             }
 
+            // Fall back to LibraryItemId (legacy method)
             if (!string.IsNullOrEmpty(info.LibraryItemId))
             {
                 var item = LibraryManager.GetItemById(info.LibraryItemId);
 
                 if (item is null)
                 {
-                    Logger.LogWarning("Unable to find linked item at path {0}", info.Path);
+                    Logger.LogWarning("Unable to find linked item by LibraryItemId {0}", info.LibraryItemId);
                 }
 
                 return item;
@@ -1837,6 +2121,7 @@ namespace MediaBrowser.Controller.Entities
 
             return null;
         }
+#pragma warning restore CS0618
 
         /// <summary>
         /// Adds a studio to the item.
@@ -1936,12 +2221,23 @@ namespace MediaBrowser.Controller.Entities
             // I think it is okay to do this here.
             // if this is only called when a user is manually forcing something to un-played
             // then it probably is what we want to do...
+            ResetPlayedState(data);
+
+            UserDataManager.SaveUserData(user, this, data, UserDataSaveReason.TogglePlayed, CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Clears the played state on the supplied user data.
+        /// </summary>
+        /// <param name="data">The user data to reset.</param>
+        protected static void ResetPlayedState(UserItemData data)
+        {
+            ArgumentNullException.ThrowIfNull(data);
+
             data.PlayCount = 0;
             data.PlaybackPositionTicks = 0;
             data.LastPlayedDate = null;
             data.Played = false;
-
-            UserDataManager.SaveUserData(user, this, data, UserDataSaveReason.TogglePlayed, CancellationToken.None);
         }
 
         /// <summary>
@@ -2134,17 +2430,6 @@ namespace MediaBrowser.Controller.Entities
                     DateModified = chapter.ImageDateModified,
                     Type = imageType
                 };
-            }
-
-            // Music albums usually don't have dedicated backdrops, so return one from the artist instead
-            if (GetType() == typeof(MusicAlbum) && imageType == ImageType.Backdrop)
-            {
-                var artist = FindParent<MusicArtist>();
-
-                if (artist is not null)
-                {
-                    return artist.GetImages(imageType).ElementAtOrDefault(imageIndex);
-                }
             }
 
             return GetImages(imageType)
@@ -2428,7 +2713,13 @@ namespace MediaBrowser.Controller.Entities
             return path;
         }
 
-        public virtual void FillUserDataDtoValues(UserItemDataDto dto, UserItemData userData, BaseItemDto itemDto, User user, DtoOptions fields)
+        public virtual void FillUserDataDtoValues(
+            UserItemDataDto dto,
+            UserItemData userData,
+            BaseItemDto itemDto,
+            User user,
+            DtoOptions fields,
+            (int Played, int Total)? precomputedCounts = null)
         {
             if (RunTimeTicks.HasValue)
             {
@@ -2444,6 +2735,32 @@ namespace MediaBrowser.Controller.Entities
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Applies the owner's premiere date and production year to an owned item, returning whether anything changed.
+        /// </summary>
+        /// <param name="owner">The owner.</param>
+        /// <param name="ownedItem">The owned item.</param>
+        /// <returns><c>true</c> if the owned item was changed, else <c>false</c>.</returns>
+        internal static bool InheritDatesFromOwner(BaseItem owner, BaseItem ownedItem)
+        {
+            // Extras have no release date of their own, so the owner's is authoritative.
+            var changed = false;
+
+            if (owner.ProductionYear is not null && ownedItem.ProductionYear != owner.ProductionYear)
+            {
+                ownedItem.ProductionYear = owner.ProductionYear;
+                changed = true;
+            }
+
+            if (owner.PremiereDate is not null && ownedItem.PremiereDate != owner.PremiereDate)
+            {
+                ownedItem.PremiereDate = owner.PremiereDate;
+                changed = true;
+            }
+
+            return changed;
         }
 
         protected async Task RefreshMetadataForOwnedItem(BaseItem ownedItem, bool copyTitleMetadata, MetadataRefreshOptions options, CancellationToken cancellationToken)
@@ -2503,6 +2820,11 @@ namespace MediaBrowser.Controller.Entities
                 if (!string.Equals(item.CustomRating, ownedItem.CustomRating, StringComparison.Ordinal))
                 {
                     ownedItem.CustomRating = item.CustomRating;
+                    newOptions.ForceSave = true;
+                }
+
+                if (InheritDatesFromOwner(item, ownedItem))
+                {
                     newOptions.ForceSave = true;
                 }
             }
@@ -2628,7 +2950,7 @@ namespace MediaBrowser.Controller.Entities
                 .Select(i => i.OfficialRating)
                 .Where(i => !string.IsNullOrEmpty(i))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Select(rating => (rating, LocalizationManager.GetRatingScore(rating)))
+                .Select(rating => (rating, LocalizationManager.GetRatingScore(rating, GetPreferredMetadataCountryCode())))
                 .OrderBy(i => i.Item2 is null ? 1001 : i.Item2.Score)
                 .ThenBy(i => i.Item2 is null ? 1001 : i.Item2.SubScore)
                 .Select(i => i.rating);
@@ -2648,7 +2970,7 @@ namespace MediaBrowser.Controller.Entities
 
         public IReadOnlyList<BaseItem> GetThemeSongs(User user, IEnumerable<(ItemSortBy SortBy, SortOrder SortOrder)> orderBy)
         {
-            return LibraryManager.Sort(GetExtras().Where(e => e.ExtraType == Model.Entities.ExtraType.ThemeSong), user, orderBy).ToArray();
+            return LibraryManager.Sort(GetExtras(user).Where(e => e.ExtraType == Model.Entities.ExtraType.ThemeSong), user, orderBy).ToArray();
         }
 
         public IReadOnlyList<BaseItem> GetThemeVideos(User user = null)
@@ -2658,33 +2980,65 @@ namespace MediaBrowser.Controller.Entities
 
         public IReadOnlyList<BaseItem> GetThemeVideos(User user, IEnumerable<(ItemSortBy SortBy, SortOrder SortOrder)> orderBy)
         {
-            return LibraryManager.Sort(GetExtras().Where(e => e.ExtraType == Model.Entities.ExtraType.ThemeVideo), user, orderBy).ToArray();
+            return LibraryManager.Sort(GetExtras(user).Where(e => e.ExtraType == Model.Entities.ExtraType.ThemeVideo), user, orderBy).ToArray();
+        }
+
+        /// <summary>
+        /// Gets the ids of the items whose owned extras belong to this item.
+        /// </summary>
+        /// <returns>An array containing the owner ids.</returns>
+        protected virtual Guid[] GetExtraOwnerIds()
+        {
+            return [Id];
+        }
+
+        /// <summary>
+        /// Gets the ids of this item and the versions of it whose extras it maintains.
+        /// </summary>
+        /// <returns>An array containing the version ids.</returns>
+        protected virtual Guid[] GetOwnedVersionIds()
+        {
+            return [Id];
+        }
+
+        /// <summary>
+        /// Gets the id of the version an extra belongs to.
+        /// </summary>
+        /// <param name="extra">The extra.</param>
+        /// <returns>The id of the owning version.</returns>
+        protected virtual Guid GetOwnerIdForExtra(BaseItem extra)
+        {
+            return Id;
         }
 
         /// <summary>
         /// Get all extras associated with this item, sorted by <see cref="SortName"/>.
         /// </summary>
+        /// <param name="user">The user to apply parental restrictions for, or <c>null</c> to skip restriction checks.</param>
         /// <returns>An enumerable containing the items.</returns>
-        public IEnumerable<BaseItem> GetExtras()
+        public IEnumerable<BaseItem> GetExtras(User user = null)
         {
-            return ExtraIds
-                .Select(LibraryManager.GetItemById)
-                .Where(i => i is not null)
-                .OrderBy(i => i.SortName);
+            return LibraryManager.GetItemList(new InternalItemsQuery(user)
+            {
+                OwnerIds = GetExtraOwnerIds(),
+                OrderBy = [(ItemSortBy.SortName, SortOrder.Ascending)]
+            });
         }
 
         /// <summary>
         /// Get all extras with specific types that are associated with this item.
         /// </summary>
         /// <param name="extraTypes">The types of extras to retrieve.</param>
+        /// <param name="user">The user to apply parental restrictions for, or <c>null</c> to skip restriction checks.</param>
         /// <returns>An enumerable containing the extras.</returns>
-        public IEnumerable<BaseItem> GetExtras(IReadOnlyCollection<ExtraType> extraTypes)
+        public IEnumerable<BaseItem> GetExtras(IReadOnlyCollection<ExtraType> extraTypes, User user = null)
         {
-            return ExtraIds
-                .Select(LibraryManager.GetItemById)
-                .Where(i => i is not null)
-                .Where(i => i.ExtraType.HasValue && extraTypes.Contains(i.ExtraType.Value))
-                .OrderBy(i => i.SortName);
+            return LibraryManager.GetItemList(new InternalItemsQuery(user)
+            {
+                OwnerIds = GetExtraOwnerIds(),
+                ExtraTypes = extraTypes.ToArray(),
+                OrderBy = [(ItemSortBy.SortName, SortOrder.Ascending)]
+            });
         }
 
         public virtual long GetRunTimeTicksForPlayState()

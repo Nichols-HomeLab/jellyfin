@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 16
-VisualStudioVersion = 16.0.30503.244
+# Visual Studio Version 18
+VisualStudioVersion = 18.0.11222.15 d18.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Jellyfin.Server", "Jellyfin.Server\Jellyfin.Server.csproj", "{07E39F42-A2C6-4B32-AF8C-725F957A73FF}"
 EndProject
@@ -30,6 +30,7 @@ EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{41093F42-C7CC-4D07-956B-6182CBEDE2EC}"
 	ProjectSection(SolutionItems) = preProject
 		.editorconfig = .editorconfig
+		Directory.Packages.props = Directory.Packages.props
 		SharedVersion.cs = SharedVersion.cs
 	EndProjectSection
 EndProject
@@ -97,6 +98,8 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Jellyfin.Database.Implementations", "src\Jellyfin.Database\Jellyfin.Database.Implementations\Jellyfin.Database.Implementations.csproj", "{8C9F9221-8415-496C-B1F5-E7756F03FA59}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Jellyfin.CodeAnalysis", "src\Jellyfin.CodeAnalysis\Jellyfin.CodeAnalysis.csproj", "{11643D0F-6761-4EF7-AB71-6F9F8DE00714}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Jellyfin.Drawing.Skia.Tests", "tests\Jellyfin.Drawing.Skia.Tests\Jellyfin.Drawing.Skia.Tests.csproj", "{E24A279C-9A37-419A-8F9C-853C11FBE753}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -264,6 +267,10 @@ Global
 		{11643D0F-6761-4EF7-AB71-6F9F8DE00714}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{11643D0F-6761-4EF7-AB71-6F9F8DE00714}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{11643D0F-6761-4EF7-AB71-6F9F8DE00714}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E24A279C-9A37-419A-8F9C-853C11FBE753}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E24A279C-9A37-419A-8F9C-853C11FBE753}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E24A279C-9A37-419A-8F9C-853C11FBE753}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E24A279C-9A37-419A-8F9C-853C11FBE753}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -296,6 +303,7 @@ Global
 		{A5590358-33CC-4B39-BDE7-DC62FEB03C76} = {4C54CE05-69C8-48FA-8785-39F7F6DB1CAD}
 		{8C9F9221-8415-496C-B1F5-E7756F03FA59} = {4C54CE05-69C8-48FA-8785-39F7F6DB1CAD}
 		{11643D0F-6761-4EF7-AB71-6F9F8DE00714} = {C9F0AB5D-F4D7-40C8-A353-3305C86D6D4C}
+		{E24A279C-9A37-419A-8F9C-853C11FBE753} = {FBBB5129-006E-4AD7-BAD5-8B7CA1D10ED6}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {3448830C-EBDC-426C-85CD-7BBB9651A7FE}

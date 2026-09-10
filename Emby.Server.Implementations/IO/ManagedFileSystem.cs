@@ -586,6 +586,12 @@ namespace Emby.Server.Implementations.IO
         /// <inheritdoc />
         public virtual IEnumerable<FileSystemMetadata> GetFiles(string path, string searchPattern, IReadOnlyList<string>? extensions, bool enableCaseSensitiveExtensions, bool recursive = false)
         {
+            if (!Directory.Exists(path))
+            {
+                _logger.LogWarning("Directory does not exist: {Path}", path);
+                return [];
+            }
+
             var enumerationOptions = GetEnumerationOptions(recursive);
 
             // On linux and macOS the search pattern is case-sensitive
@@ -685,7 +691,7 @@ namespace Emby.Server.Implementations.IO
             }
             catch (Exception ex) when (ex is UnauthorizedAccessException or DirectoryNotFoundException or SecurityException)
             {
-                _logger.LogError(ex, "Failed to enumerate path {Path}", path);
+                _logger.LogWarning("Failed to enumerate path \"{Path}\": {Message}", path, ex.Message);
                 return Enumerable.Empty<string>();
             }
         }

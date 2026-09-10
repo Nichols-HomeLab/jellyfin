@@ -208,6 +208,7 @@ public class UserController : BaseJellyfinApiController
     /// <returns>A <see cref="Task"/> containing an <see cref="AuthenticationRequest"/> with information about the new session.</returns>
     [HttpPost("AuthenticateByName")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [Tags("Authentication")]
     public async Task<ActionResult<AuthenticationResult>> AuthenticateUserByName([FromBody, Required] AuthenticateUserByName request)
     {
         var auth = await _authContext.GetAuthorizationInfo(Request).ConfigureAwait(false);
@@ -243,6 +244,7 @@ public class UserController : BaseJellyfinApiController
     /// <returns>A <see cref="Task"/> containing an <see cref="AuthenticationRequest"/> with information about the new session.</returns>
     [HttpPost("AuthenticateWithQuickConnect")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [Tags("Authentication")]
     public ActionResult<AuthenticationResult> AuthenticateWithQuickConnect([FromBody, Required] QuickConnectDto request)
     {
         try
@@ -336,29 +338,6 @@ public class UserController : BaseJellyfinApiController
         [FromRoute, Required] Guid userId,
         [FromBody, Required] UpdateUserPassword request)
         => UpdateUserPassword(userId, request);
-
-    /// <summary>
-    /// Updates a user's easy password.
-    /// </summary>
-    /// <param name="userId">The user id.</param>
-    /// <param name="request">The <see cref="UpdateUserEasyPassword"/> request.</param>
-    /// <response code="204">Password successfully reset.</response>
-    /// <response code="403">User is not allowed to update the password.</response>
-    /// <response code="404">User not found.</response>
-    /// <returns>A <see cref="NoContentResult"/> indicating success or a <see cref="ForbidResult"/> or a <see cref="NotFoundResult"/> on failure.</returns>
-    [HttpPost("{userId}/EasyPassword")]
-    [Obsolete("Use Quick Connect instead")]
-    [ApiExplorerSettings(IgnoreApi = true)]
-    [Authorize]
-    [ProducesResponseType(StatusCodes.Status204NoContent)]
-    [ProducesResponseType(StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public ActionResult UpdateUserEasyPassword(
-        [FromRoute, Required] Guid userId,
-        [FromBody, Required] UpdateUserEasyPassword request)
-    {
-        return Forbid();
-    }
 
     /// <summary>
     /// Updates a user.
@@ -561,6 +540,7 @@ public class UserController : BaseJellyfinApiController
     /// <returns>A <see cref="Task"/> containing a <see cref="ForgotPasswordResult"/>.</returns>
     [HttpPost("ForgotPassword")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [Tags("Authentication")]
     public async Task<ActionResult<ForgotPasswordResult>> ForgotPassword([FromBody, Required] ForgotPasswordDto forgotPasswordRequest)
     {
         var ip = HttpContext.GetNormalizedRemoteIP();
@@ -585,6 +565,7 @@ public class UserController : BaseJellyfinApiController
     /// <returns>A <see cref="Task"/> containing a <see cref="PinRedeemResult"/>.</returns>
     [HttpPost("ForgotPassword/Pin")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [Tags("Authentication")]
     public async Task<ActionResult<PinRedeemResult>> ForgotPasswordPin([FromBody, Required] ForgotPasswordPinDto forgotPasswordPinRequest)
     {
         var result = await _userManager.RedeemPasswordResetPin(forgotPasswordPinRequest.Pin).ConfigureAwait(false);

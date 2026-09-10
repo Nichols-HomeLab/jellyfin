@@ -178,6 +178,11 @@ namespace Jellyfin.LiveTv
         {
             var program = _libraryManager.GetItemById(id);
 
+            if (program is null)
+            {
+                return null;
+            }
+
             var dto = _dtoService.GetBaseItemDto(program, new DtoOptions(), user);
 
             var list = new List<(BaseItemDto ItemDto, string ExternalId, string ExternalSeriesId)>
@@ -287,7 +292,7 @@ namespace Jellyfin.LiveTv
                 GenreIds = query.GenreIds
             };
 
-            if (query.Limit.HasValue)
+            if (query.Limit.HasValue && query.Limit.Value > 0)
             {
                 internalQuery.Limit = Math.Max(query.Limit.Value * 4, 200);
             }
@@ -305,7 +310,7 @@ namespace Jellyfin.LiveTv
 
             IEnumerable<BaseItem> programs = orderedPrograms;
 
-            if (query.Limit.HasValue)
+            if (query.Limit.HasValue && query.Limit.Value > 0)
             {
                 programs = programs.Take(query.Limit.Value);
             }
@@ -1257,7 +1262,7 @@ namespace Jellyfin.LiveTv
 
         public Folder GetInternalLiveTvFolder(CancellationToken cancellationToken)
         {
-            var name = _localization.GetLocalizedString("HeaderLiveTV");
+            var name = _localization.GetServerLocalizedString("HeaderLiveTV");
             return _libraryManager.GetNamedView(name, CollectionType.livetv, name);
         }
 

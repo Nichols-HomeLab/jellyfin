@@ -309,7 +309,7 @@ namespace Emby.Server.Implementations.Session
         {
             if (!session.SessionControllers.Any(i => i.IsSessionActive))
             {
-                var key = GetSessionKey(session.Client, session.DeviceId);
+                var key = GetSessionKey(session.Client, session.DeviceId, session.UserId);
 
                 _activeConnections.TryRemove(key, out _);
                 if (!string.IsNullOrEmpty(session.PlayState?.LiveStreamId))
@@ -343,6 +343,10 @@ namespace Emby.Server.Implementations.Session
                     _activeLiveStreamSessions.TryRemove(liveStreamId, out _);
                 }
             }
+            else
+            {
+                liveStreamNeedsToBeClosed = true;
+            }
 
             if (liveStreamNeedsToBeClosed)
             {
@@ -365,7 +369,7 @@ namespace Emby.Server.Implementations.Session
 
             if (session is not null)
             {
-                var key = GetSessionKey(session.Client, session.DeviceId);
+                var key = GetSessionKey(session.Client, session.DeviceId, session.UserId);
 
                 _activeConnections.TryRemove(key, out _);
 
@@ -386,7 +390,7 @@ namespace Emby.Server.Implementations.Session
         {
             if (session is null)
             {
-               return;
+                return;
             }
 
             if (string.IsNullOrEmpty(info.MediaSourceId))
@@ -453,18 +457,6 @@ namespace Emby.Server.Implementations.Session
             session.PlayState.RepeatMode = info.RepeatMode;
             session.PlayState.PlaybackOrder = info.PlaybackOrder;
             session.PlaylistItemId = info.PlaylistItemId;
-
-            var nowPlayingQueue = info.NowPlayingQueue;
-
-            if (nowPlayingQueue?.Length > 0 && !nowPlayingQueue.SequenceEqual(session.NowPlayingQueue))
-            {
-                session.NowPlayingQueue = nowPlayingQueue;
-
-                var itemIds = Array.ConvertAll(nowPlayingQueue, queue => queue.Id);
-                session.NowPlayingQueueFullItems = _dtoService.GetBaseItemDtos(
-                    _libraryManager.GetItemList(new InternalItemsQuery { ItemIds = itemIds }),
-                    new DtoOptions(true));
-            }
         }
 
         /// <summary>
@@ -483,8 +475,11 @@ namespace Emby.Server.Implementations.Session
             }
         }
 
-        private static string GetSessionKey(string appName, string deviceId)
-            => appName + deviceId;
+        // The user is part of the key because the client name and the device id are taken from the
+        // request headers and are not bound to the access token. Without it, any authenticated user
+        // could claim another user's client/device pair and take over their session.
+        private static string GetSessionKey(string appName, string deviceId, Guid userId)
+            => appName + deviceId + userId.ToString("N", CultureInfo.InvariantCulture);
 
         /// <summary>
         /// Gets the connection.
@@ -508,7 +503,7 @@ namespace Emby.Server.Implementations.Session
 
             ArgumentException.ThrowIfNullOrEmpty(deviceId);
 
-            var key = GetSessionKey(appName, deviceId);
+            var key = GetSessionKey(appName, deviceId, user?.Id ?? Guid.Empty);
             SessionInfo newSession = CreateSessionInfo(key, appName, appVersion, deviceId, deviceName, remoteEndPoint, user);
             SessionInfo sessionInfo = _activeConnections.GetOrAdd(key, newSession);
             if (ReferenceEquals(newSession, sessionInfo))
@@ -649,8 +644,7 @@ namespace Emby.Server.Implementations.Session
             if (playingSessions.Count > 0)
             {
                 var idle = playingSessions
-                    .Where(i => (DateTime.UtcNow - i.LastPlaybackCheckIn).TotalMinutes > 5)
-                    .ToList();
+                    .Where(i => (DateTime.UtcNow - i.LastPlaybackCheckIn).TotalMinutes > 5);
 
                 foreach (var session in idle)
                 {
@@ -664,7 +658,7 @@ namespace Emby.Server.Implementations.Session
                             ItemId = session.NowPlayingItem is null ? Guid.Empty : session.NowPlayingItem.Id,
                             SessionId = session.Id,
                             MediaSourceId = session.PlayState?.MediaSourceId,
-                            PositionTicks = session.PlayState?.PositionTicks
+                            PositionTicks = session.LastPlaybackCheckInPositionTicks
                         }).ConfigureAwait(false);
                     }
                     catch (Exception ex)
@@ -738,6 +732,31 @@ namespace Emby.Server.Implementations.Session
         }
 
         /// <summary>
+        /// Resolves the item whose user data (playback position, played status) should be updated
+        /// for a playback report. When an alternate version is played the client reports the displayed
+        /// item as <c>ItemId</c> and the played version as <c>MediaSourceId</c>.
+        /// </summary>
+        /// <param name="libraryItem">The now playing (displayed) item.</param>
+        /// <param name="mediaSourceId">The reported media source id.</param>
+        /// <returns>The item to track progress against.</returns>
+        private BaseItem GetProgressItem(BaseItem libraryItem, string mediaSourceId)
+        {
+            if (libraryItem is Video libraryVideo
+                && !string.IsNullOrEmpty(mediaSourceId)
+                && Guid.TryParse(mediaSourceId, out var mediaSourceItemId)
+                && !mediaSourceItemId.Equals(libraryVideo.Id))
+            {
+                var versionItem = libraryVideo.GetAlternateVersion(mediaSourceItemId);
+                if (versionItem is not null)
+                {
+                    return versionItem;
+                }
+            }
+
+            return libraryItem;
+        }
+
+        /// <summary>
         /// Used to report that playback has started for an item.
         /// </summary>
         /// <param name="info">The info.</param>
@@ -768,9 +787,10 @@ namespace Emby.Server.Implementations.Session
 
             if (libraryItem is not null)
             {
+                var progressItem = GetProgressItem(libraryItem, info.MediaSourceId);
                 foreach (var user in users)
                 {
-                    OnPlaybackStart(user, libraryItem);
+                    OnPlaybackStart(user, progressItem);
                 }
             }
 
@@ -792,6 +812,16 @@ namespace Emby.Server.Implementations.Session
                 PlaybackPositionTicks = info.PositionTicks,
                 PlaySessionId = info.PlaySessionId
             };
+
+            if (info.Item is not null)
+            {
+                _logger.LogInformation(
+                    "User {0} started playback of '{1}' ({2} {3})",
+                    session.UserName,
+                    info.Item.Name,
+                    session.Client,
+                    session.ApplicationVersion);
+            }
 
             await _eventManager.PublishAsync(eventArgs).ConfigureAwait(false);
 
@@ -821,10 +851,6 @@ namespace Emby.Server.Implementations.Session
             if (item.SupportsPlayedStatus && !item.SupportsPositionTicksResume)
             {
                 data.Played = true;
-            }
-            else
-            {
-                data.Played = false;
             }
 
             _userDataManager.SaveUserData(user, item, data, UserDataSaveReason.PlaybackStart, CancellationToken.None);
@@ -896,9 +922,10 @@ namespace Emby.Server.Implementations.Session
             // only update saved user data on actual check-ins, not automated ones
             if (libraryItem is not null && !isAutomated)
             {
+                var progressItem = GetProgressItem(libraryItem, info.MediaSourceId);
                 foreach (var user in users)
                 {
-                    OnPlaybackProgress(user, libraryItem, info);
+                    OnPlaybackProgress(user, progressItem, info);
                 }
             }
 
@@ -950,7 +977,7 @@ namespace Emby.Server.Implementations.Session
             }
 
             var tracksChanged = UpdatePlaybackSettings(user, info, data);
-            if (!tracksChanged)
+            if (tracksChanged)
             {
                 changed = true;
             }
@@ -958,6 +985,20 @@ namespace Emby.Server.Implementations.Session
             if (changed)
             {
                 _userDataManager.SaveUserData(user, item, data, UserDataSaveReason.PlaybackProgress, CancellationToken.None);
+
+                // A completed version marks every alternate version played and clears their resume points, so the
+                // whole movie leaves Continue Watching and reads as watched everywhere. (Per-version resume positions
+                // only persist while nothing has been completed yet.)
+                if (data.Played == true && item is Video playedVideo)
+                {
+                    playedVideo.PropagatePlayedState(user, true);
+                }
+            }
+
+            if ((!user.RememberAudioSelections && info.AudioStreamIndex.HasValue)
+                || (!user.RememberSubtitleSelections && info.SubtitleStreamIndex.HasValue))
+            {
+                _userDataManager.ResetPlaybackStreamSelections(user, item);
             }
         }
 
@@ -967,7 +1008,7 @@ namespace Emby.Server.Implementations.Session
 
             if (user.RememberAudioSelections)
             {
-                if (data.AudioStreamIndex != info.AudioStreamIndex)
+                if (info.AudioStreamIndex.HasValue && data.AudioStreamIndex != info.AudioStreamIndex)
                 {
                     data.AudioStreamIndex = info.AudioStreamIndex;
                     changed = true;
@@ -984,7 +1025,7 @@ namespace Emby.Server.Implementations.Session
 
             if (user.RememberSubtitleSelections)
             {
-                if (data.SubtitleStreamIndex != info.SubtitleStreamIndex)
+                if (info.SubtitleStreamIndex.HasValue && data.SubtitleStreamIndex != info.SubtitleStreamIndex)
                 {
                     data.SubtitleStreamIndex = info.SubtitleStreamIndex;
                     changed = true;
@@ -1015,14 +1056,21 @@ namespace Emby.Server.Implementations.Session
 
             ArgumentNullException.ThrowIfNull(info);
 
-            if (info.PositionTicks.HasValue && info.PositionTicks.Value < 0)
-            {
-                throw new ArgumentOutOfRangeException(nameof(info), "The PlaybackStopInfo's PositionTicks was negative.");
-            }
-
             var session = GetSession(info.SessionId);
 
             session.StopAutomaticProgress();
+
+            if (info.PositionTicks.HasValue && info.PositionTicks.Value < 0)
+            {
+                // Ensure live stream is cleaned up before throwing, to prevent tuner
+                // resource leaks when stalled clients report a negative PositionTicks.
+                if (!string.IsNullOrEmpty(info.LiveStreamId))
+                {
+                    await CloseLiveStreamIfNeededAsync(info.LiveStreamId, session.Id).ConfigureAwait(false);
+                }
+
+                throw new ArgumentOutOfRangeException(nameof(info), "The PlaybackStopInfo's PositionTicks was negative.");
+            }
 
             var libraryItem = info.ItemId.IsEmpty()
                 ? null
@@ -1060,11 +1108,12 @@ namespace Emby.Server.Implementations.Session
                 var msString = info.PositionTicks.HasValue ? (info.PositionTicks.Value / 10000).ToString(CultureInfo.InvariantCulture) : "unknown";
 
                 _logger.LogInformation(
-                    "Playback stopped reported by app {0} {1} playing {2}. Stopped at {3} ms",
-                    session.Client,
-                    session.ApplicationVersion,
+                    "User {0} stopped playback of '{1}' at {2}ms ({3} {4})",
+                    session.UserName,
                     info.Item.Name,
-                    msString);
+                    msString,
+                    session.Client,
+                    session.ApplicationVersion);
             }
 
             if (info.NowPlayingQueue is not null)
@@ -1081,9 +1130,10 @@ namespace Emby.Server.Implementations.Session
 
             if (libraryItem is not null)
             {
+                var progressItem = GetProgressItem(libraryItem, info.MediaSourceId);
                 foreach (var user in users)
                 {
-                    playedToCompletion = OnPlaybackStopped(user, libraryItem, info.PositionTicks, info.Failed);
+                    playedToCompletion = OnPlaybackStopped(user, progressItem, info.PositionTicks, info.Failed);
                 }
             }
 
@@ -1135,6 +1185,14 @@ namespace Emby.Server.Implementations.Session
             }
 
             _userDataManager.SaveUserData(user, item, data, UserDataSaveReason.PlaybackFinished, CancellationToken.None);
+
+            // A completed version marks every alternate version played and clears their resume points, so the
+            // whole movie leaves Continue Watching and reads as watched everywhere. (Per-version resume positions
+            // only persist while nothing has been completed yet.)
+            if (data.Played == true && item is Video playedVideo)
+            {
+                playedVideo.PropagatePlayedState(user, true);
+            }
 
             return playedToCompletion;
         }
@@ -1203,7 +1261,6 @@ namespace Emby.Server.Implementations.Session
                 SupportsMediaControl = sessionInfo.SupportsMediaControl,
                 SupportsRemoteControl = sessionInfo.SupportsRemoteControl,
                 NowPlayingQueue = sessionInfo.NowPlayingQueue,
-                NowPlayingQueueFullItems = sessionInfo.NowPlayingQueueFullItems,
                 HasCustomDeviceName = sessionInfo.HasCustomDeviceName,
                 PlaylistItemId = sessionInfo.PlaylistItemId,
                 ServerId = sessionInfo.ServerId,
@@ -1483,11 +1540,52 @@ namespace Emby.Server.Implementations.Session
             return SendMessageToSession(session, SessionMessageType.Playstate, command, cancellationToken);
         }
 
-        private static void AssertCanControl(SessionInfo session, SessionInfo controllingSession)
+        private void AssertCanControl(SessionInfo session, SessionInfo controllingSession)
         {
             ArgumentNullException.ThrowIfNull(session);
 
             ArgumentNullException.ThrowIfNull(controllingSession);
+
+            var controllingUserId = controllingSession.UserId;
+
+            // Controlling a session is always allowed when:
+            // - the caller has no associated user (an API key, which is a privileged context),
+            // - the target session is public (has no owning user), or
+            // - the caller's user is associated with the target session.
+            // Controlling a session owned by a different user requires the
+            // EnableRemoteControlOfOtherUsers permission.
+            if (controllingUserId.IsEmpty()
+                || session.UserId.IsEmpty()
+                || session.ContainsUser(controllingUserId))
+            {
+                return;
+            }
+
+            var controllingUser = _userManager.GetUserById(controllingUserId);
+            if (controllingUser is null
+                || !controllingUser.HasPermission(PermissionKind.EnableRemoteControlOfOtherUsers))
+            {
+                throw new SecurityException("The current user does not have permission to remote control other users.");
+            }
+        }
+
+        private void AssertCanAttachUser(SessionInfo controllingSession, Guid userId)
+        {
+            var controllingUserId = controllingSession.UserId;
+
+            // Playback reported by a session is also written to the user data of its additional users,
+            // so attaching anyone but the calling user requires administrative privileges.
+            if (controllingUserId.IsEmpty() || controllingUserId.Equals(userId))
+            {
+                return;
+            }
+
+            var controllingUser = _userManager.GetUserById(controllingUserId);
+            if (controllingUser is null
+                || !controllingUser.HasPermission(PermissionKind.IsAdministrator))
+            {
+                throw new SecurityException("The current user does not have permission to attach another user to a session.");
+            }
         }
 
         /// <summary>
@@ -1505,15 +1603,23 @@ namespace Emby.Server.Implementations.Session
         /// <summary>
         /// Adds the additional user.
         /// </summary>
+        /// <param name="controllingSessionId">The controlling session identifier.</param>
         /// <param name="sessionId">The session identifier.</param>
         /// <param name="userId">The user identifier.</param>
-        /// <exception cref="UnauthorizedAccessException">Cannot modify additional users without authenticating first.</exception>
+        /// <exception cref="SecurityException">The controlling user is not allowed to attach the user to the session.</exception>
         /// <exception cref="ArgumentException">The requested user is already the primary user of the session.</exception>
-        public void AddAdditionalUser(string sessionId, Guid userId)
+        public void AddAdditionalUser(string controllingSessionId, string sessionId, Guid userId)
         {
             CheckDisposed();
 
             var session = GetSession(sessionId);
+
+            if (!string.IsNullOrEmpty(controllingSessionId))
+            {
+                var controllingSession = GetSession(controllingSessionId);
+                AssertCanControl(session, controllingSession);
+                AssertCanAttachUser(controllingSession, userId);
+            }
 
             if (session.UserId.Equals(userId))
             {
@@ -1522,7 +1628,8 @@ namespace Emby.Server.Implementations.Session
 
             if (session.AdditionalUsers.All(i => !i.UserId.Equals(userId)))
             {
-                var user = _userManager.GetUserById(userId);
+                var user = _userManager.GetUserById(userId)
+                    ?? throw new ArgumentException("The requested user does not exist.");
                 var newUser = new SessionUserInfo
                 {
                     UserId = userId,
@@ -1536,15 +1643,21 @@ namespace Emby.Server.Implementations.Session
         /// <summary>
         /// Removes the additional user.
         /// </summary>
+        /// <param name="controllingSessionId">The controlling session identifier.</param>
         /// <param name="sessionId">The session identifier.</param>
         /// <param name="userId">The user identifier.</param>
-        /// <exception cref="UnauthorizedAccessException">Cannot modify additional users without authenticating first.</exception>
+        /// <exception cref="SecurityException">The controlling user is not allowed to control the session.</exception>
         /// <exception cref="ArgumentException">The requested user is already the primary user of the session.</exception>
-        public void RemoveAdditionalUser(string sessionId, Guid userId)
+        public void RemoveAdditionalUser(string controllingSessionId, string sessionId, Guid userId)
         {
             CheckDisposed();
 
             var session = GetSession(sessionId);
+
+            if (!string.IsNullOrEmpty(controllingSessionId))
+            {
+                AssertCanControl(session, GetSession(controllingSessionId));
+            }
 
             if (session.UserId.Equals(userId))
             {
@@ -1749,13 +1862,20 @@ namespace Emby.Server.Implementations.Session
         /// <summary>
         /// Reports the capabilities.
         /// </summary>
+        /// <param name="controllingSessionId">The controlling session identifier.</param>
         /// <param name="sessionId">The session identifier.</param>
         /// <param name="capabilities">The capabilities.</param>
-        public void ReportCapabilities(string sessionId, ClientCapabilities capabilities)
+        /// <exception cref="SecurityException">The controlling user is not allowed to control the session.</exception>
+        public void ReportCapabilities(string controllingSessionId, string sessionId, ClientCapabilities capabilities)
         {
             CheckDisposed();
 
             var session = GetSession(sessionId);
+
+            if (!string.IsNullOrEmpty(controllingSessionId))
+            {
+                AssertCanControl(session, GetSession(controllingSessionId));
+            }
 
             ReportCapabilities(session, capabilities, true);
         }
@@ -1821,7 +1941,6 @@ namespace Emby.Server.Implementations.Session
                 fields.Remove(ItemFields.Settings);
                 fields.Remove(ItemFields.SortName);
                 fields.Remove(ItemFields.Tags);
-                fields.Remove(ItemFields.ExtraIds);
 
                 dtoOptions.Fields = fields.ToArray();
 
@@ -1852,12 +1971,17 @@ namespace Emby.Server.Implementations.Session
         }
 
         /// <inheritdoc />
-        public void ReportNowViewingItem(string sessionId, string itemId)
+        public void ReportNowViewingItem(string controllingSessionId, string sessionId, string itemId)
         {
             ArgumentException.ThrowIfNullOrEmpty(itemId);
 
             var item = _libraryManager.GetItemById(new Guid(itemId));
             var session = GetSession(sessionId);
+
+            if (!string.IsNullOrEmpty(controllingSessionId))
+            {
+                AssertCanControl(session, GetSession(controllingSessionId));
+            }
 
             session.NowViewingItem = GetItemInfo(item, null);
         }

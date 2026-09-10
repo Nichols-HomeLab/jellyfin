@@ -125,7 +125,13 @@ public class ImageController : BaseJellyfinApiController
         {
             // Handle image/png; charset=utf-8
             var mimeType = Request.ContentType?.Split(';').FirstOrDefault();
-            var userDataPath = Path.Combine(_serverConfigurationManager.ApplicationPaths.UserConfigurationDirectoryPath, user.Username);
+            var userConfigurationDirectoryPath = _serverConfigurationManager.ApplicationPaths.UserConfigurationDirectoryPath;
+            var userDataPath = Path.Combine(userConfigurationDirectoryPath, user.Username);
+            if (!PathHelper.IsContainedIn(userConfigurationDirectoryPath, userDataPath))
+            {
+                return BadRequest("Invalid user.");
+            }
+
             if (user.ProfileImage is not null)
             {
                 await _userManager.ClearProfileImageAsync(user).ConfigureAwait(false);
@@ -1698,7 +1704,8 @@ public class ImageController : BaseJellyfinApiController
         return await GetImageResult(
                 options,
                 cacheDuration,
-                ImmutableDictionary<string, string>.Empty)
+                ImmutableDictionary<string, string>.Empty,
+                tag)
             .ConfigureAwait(false);
     }
 
@@ -1913,7 +1920,8 @@ public class ImageController : BaseJellyfinApiController
         return await GetImageResult(
             options,
             cacheDuration,
-            responseHeaders).ConfigureAwait(false);
+            responseHeaders,
+            tag).ConfigureAwait(false);
     }
 
     private ImageFormat[] GetOutputFormats(ImageFormat? format)
@@ -1992,18 +2000,13 @@ public class ImageController : BaseJellyfinApiController
     private async Task<ActionResult> GetImageResult(
         ImageProcessingOptions imageProcessingOptions,
         TimeSpan? cacheDuration,
-        IDictionary<string, string> headers)
+        IDictionary<string, string> headers,
+        string? tag)
     {
         var (imagePath, imageContentType, dateImageModified) = await _imageProcessor.ProcessImage(imageProcessingOptions).ConfigureAwait(false);
 
         var disableCaching = Request.Headers[HeaderNames.CacheControl].Contains("no-cache");
-        var parsingSuccessful = DateTime.TryParse(Request.Headers[HeaderNames.IfModifiedSince], out var ifModifiedSinceHeader);
-
-        // if the parsing of the IfModifiedSince header was not successful, disable caching
-        if (!parsingSuccessful)
-        {
-            // disableCaching = true;
-        }
+        var hasTag = !string.IsNullOrEmpty(tag);
 
         foreach (var (key, value) in headers)
         {
@@ -2025,7 +2028,8 @@ public class ImageController : BaseJellyfinApiController
         {
             if (cacheDuration.HasValue)
             {
-                Response.Headers.Append(HeaderNames.CacheControl, "public, max-age=" + cacheDuration.Value.TotalSeconds);
+                // When tag is provided, the URL is effectively immutable - the tag changes when the image changes
+                Response.Headers.Append(HeaderNames.CacheControl, "public, max-age=" + cacheDuration.Value.TotalSeconds + ", immutable");
             }
             else
             {
@@ -2034,10 +2038,27 @@ public class ImageController : BaseJellyfinApiController
 
             Response.Headers.Append(HeaderNames.LastModified, dateImageModified.ToUniversalTime().ToString("ddd, dd MMM yyyy HH:mm:ss \"GMT\"", CultureInfo.InvariantCulture));
 
-            // if the image was not modified since "ifModifiedSinceHeader"-header, return a HTTP status code 304 not modified
-            if (!(dateImageModified > ifModifiedSinceHeader) && cacheDuration.HasValue)
+            // Add ETag header for stronger cache validation when tag is provided
+            if (hasTag)
             {
-                if (ifModifiedSinceHeader.Add(cacheDuration.Value) < DateTime.UtcNow)
+                Response.Headers.Append(HeaderNames.ETag, $"\"{tag}\"");
+
+                // Check If-None-Match header for ETag-based validation (preferred over If-Modified-Since)
+                var ifNoneMatch = Request.Headers[HeaderNames.IfNoneMatch].ToString();
+                if (!string.IsNullOrEmpty(ifNoneMatch)
+                    && (string.Equals(ifNoneMatch, $"\"{tag}\"", StringComparison.Ordinal)
+                        || string.Equals(ifNoneMatch, tag, StringComparison.Ordinal)))
+                {
+                    Response.StatusCode = StatusCodes.Status304NotModified;
+                    return new ContentResult();
+                }
+            }
+
+            // Check If-Modified-Since header for time-based validation
+            if (DateTime.TryParse(Request.Headers[HeaderNames.IfModifiedSince], CultureInfo.InvariantCulture, out var ifModifiedSinceHeader))
+            {
+                // Return 304 if the image has not been modified since the client's cached version
+                if (dateImageModified <= ifModifiedSinceHeader)
                 {
                     Response.StatusCode = StatusCodes.Status304NotModified;
                     return new ContentResult();
