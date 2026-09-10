@@ -253,6 +253,8 @@ namespace Jellyfin.Server
             }
             catch (Exception ex)
             {
+                // Migration-only jobs must not report success after a caught startup failure.
+                Environment.ExitCode = 1;
                 _restartOnShutdown = false;
                 _logger.LogCritical(ex, "Error while starting server");
                 if (_setupServer!.IsAlive && !configurationCompleted)
